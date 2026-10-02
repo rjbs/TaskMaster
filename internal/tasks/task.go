@@ -132,7 +132,7 @@ func validateTask(obj map[string]any) *jmap.SetError {
 			}
 		}
 	}
-	for _, prop := range []string{"created", "updated"} {
+	for _, prop := range []string{"created", "updated", "progressUpdated"} {
 		if v, ok := obj[prop]; ok {
 			s, _ := v.(string)
 			if _, ok := parseUTCDateTime(s); !ok {

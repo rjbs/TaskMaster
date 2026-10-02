@@ -690,3 +690,90 @@ func TestEventSource(t *testing.T) {
 		t.Fatal("no state event received")
 	}
 }
+
+// TestVendorProperties walks through the NerfJournal encoding from that
+// project's JMAP-SPEC.md: vendor-prefixed properties, colon-bearing keyword
+// keys, a fixed-key link, and the patches its sweep and reopen flows send.
+func TestVendorProperties(t *testing.T) {
+	e := newEnv(t)
+	const autoCancel = "nerfjournal.rjbs.cloud:autoCancel"
+	const endedAt = "nerfjournal.rjbs.cloud:endedAt"
+	const category = "keywords/nerfjournal:category:Work"
+
+	id := e.createTask(e.defaultListID(), obj{
+		"uid":             "9d2f5b1e-3e4a-4c5b-8f7e-1a2b3c4d5e6f",
+		"title":           "Review the release notes",
+		"start":           "2026-09-13T00:00:00",
+		"showWithoutTime": true,
+		autoCancel:        true,
+		"keywords":        obj{"nerfjournal:category:Work": true},
+		"links": obj{"nerfjournal-external": obj{
+			"@type": "Link", "href": "https://example.com/pr/42", "rel": "related",
+		}},
+	})
+	task := e.getTask(id)
+	if task[autoCancel] != true || task["showWithoutTime"] != true {
+		t.Errorf("vendor property not stored: %v", task)
+	}
+	if _, has := task["timeZone"]; has {
+		t.Error("floating start should not acquire a timeZone")
+	}
+
+	// The sweep.
+	resp := e.call("Task/set", obj{"update": obj{id: obj{
+		"progress":        "cancelled",
+		"progressUpdated": "2026-09-14T12:00:07Z",
+		endedAt:           "2026-09-13",
+	}}})
+	if resp["updated"].(obj)[id] == nil {
+		t.Fatalf("sweep update failed: %v", resp)
+	}
+	task = e.getTask(id)
+	if task["progress"] != "cancelled" || task[endedAt] != "2026-09-13" {
+		t.Errorf("sweep not applied: %v", task)
+	}
+
+	// Reopening, plus a category rename and a link change in the same patch.
+	resp = e.call("Task/set", obj{"update": obj{id: obj{
+		"progress":                           "needs-action",
+		"progressUpdated":                    nil,
+		endedAt:                              nil,
+		category:                             nil,
+		"keywords/nerfjournal:category:Home": true,
+		"links/nerfjournal-external/href":    "https://example.com/pr/43",
+	}}})
+	if resp["updated"].(obj)[id] == nil {
+		t.Fatalf("reopen update failed: %v", resp)
+	}
+	task = e.getTask(id)
+	for _, p := range []string{endedAt, "progressUpdated"} {
+		if _, has := task[p]; has {
+			t.Errorf("%s should have been removed", p)
+		}
+	}
+	if !reflect.DeepEqual(task["keywords"], obj{"nerfjournal:category:Home": true}) {
+		t.Errorf("keywords = %v", task["keywords"])
+	}
+	if task["links"].(obj)["nerfjournal-external"].(obj)["href"] != "https://example.com/pr/43" {
+		t.Errorf("links = %v", task["links"])
+	}
+
+	// Querying by the cancelled state and fetching only vendor properties.
+	e.call("Task/set", obj{"update": obj{id: obj{"progress": "cancelled"}}})
+	checkQuery(t, e, obj{"progress": []string{"cancelled"}}, nil, "Review the release notes")
+	props := e.call("Task/get", obj{"ids": []string{id}, "properties": []string{autoCancel}})["list"].([]any)[0].(obj)
+	if len(props) != 2 || props[autoCancel] != true {
+		t.Errorf("vendor property filter: %v", props)
+	}
+
+	// RFC 8620 forbids patching below a parent that does not exist, so a
+	// task with no keywords yet must be given the whole map.
+	bare := e.createTask(e.defaultListID(), obj{"title": "foreign task"})
+	resp = e.call("Task/set", obj{"update": obj{bare: obj{category: true}}})
+	if typ, _ := setErrorProps(t, resp, "notUpdated", bare); typ != "invalidPatch" {
+		t.Errorf("patch into missing keywords: %v", resp)
+	}
+	e.call("Task/set", obj{"update": obj{bare: obj{"keywords": obj{"nerfjournal:category:Work": true}}}})
+
+	checkTaskInvalid(t, e, obj{"progressUpdated": "2026-09-13"}, "progressUpdated")
+}
