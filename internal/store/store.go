@@ -34,11 +34,40 @@ func Open(path string) (*DB, error) {
 		return nil, err
 	}
 	sqldb.SetMaxOpenConns(1)
-	if _, err := sqldb.Exec(schema); err != nil {
+	if err := migrate(sqldb); err != nil {
 		sqldb.Close()
-		return nil, fmt.Errorf("applying schema: %w", err)
+		return nil, err
 	}
 	return &DB{sql: sqldb}, nil
+}
+
+// migrate applies any migrations the database has not yet seen.
+func migrate(sqldb *sql.DB) error {
+	var version int
+	if err := sqldb.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("reading schema version: %w", err)
+	}
+	if version > len(migrations) {
+		return fmt.Errorf("database schema version %d is newer than this build understands (%d)", version, len(migrations))
+	}
+	for i := version; i < len(migrations); i++ {
+		tx, err := sqldb.Begin()
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(migrations[i]); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("applying schema migration %d: %w", i+1, err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, i+1)); err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // OnCommit registers a function called after any transaction commits having

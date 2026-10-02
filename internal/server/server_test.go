@@ -457,11 +457,16 @@ func TestTaskValidation(t *testing.T) {
 	checkTaskInvalid(t, e, obj{"uid": "dup", "title": "second"}, "uid")
 }
 
-// checkQuery runs Task/query with filter and sort and checks the titles of
-// the results, in order.
+// checkQuery runs Task/query in America/New_York with filter and sort and
+// checks the titles of the results, in order.
 func checkQuery(t *testing.T, e *env, filter any, sortBy []obj, wantTitles ...string) {
 	t.Helper()
-	args := obj{"timeZone": "America/New_York"}
+	checkQueryInZone(t, e, "America/New_York", filter, sortBy, wantTitles...)
+}
+
+func checkQueryInZone(t *testing.T, e *env, tz string, filter any, sortBy []obj, wantTitles ...string) {
+	t.Helper()
+	args := obj{"timeZone": tz}
 	if filter != nil {
 		args["filter"] = filter
 	}
@@ -510,6 +515,18 @@ func TestTaskQuery(t *testing.T) {
 	checkQuery(t, e, obj{"after": "2026-10-04T00:00:00", "before": "2026-10-06T00:00:00"}, byDue,
 		"Early bird", "Water the plants", "Plan offsite")
 	checkQuery(t, e, obj{"before": "2026-10-04T05:00:00"}, byDue, "Buy bus tickets", "Early bird", "Plan offsite")
+	// Early bird is due 08:00 London (07:00Z).  Seen from New York the
+	// 05:00 bound is 09:00Z and it is included; seen from London the bound
+	// is 04:00Z and it is not.  The zoneless tasks move with the query.
+	checkQueryInZone(t, e, "Europe/London", obj{"before": "2026-10-04T05:00:00"}, byDue, "Buy bus tickets", "Plan offsite")
+	checkQueryInZone(t, e, "Europe/London", nil, byDue,
+		"Buy bus tickets", "Early bird", "Water the plants", "File expenses", "Plan offsite", "Someday: learn Go")
+	// The same local window read in two zones: from New York it is
+	// 04:00Z to 16:00Z on the 4th and catches Early bird (07:00Z); from
+	// Kiritimati (UTC+14) it is 10:00Z to 22:00Z on the 3rd and does not.
+	window := obj{"after": "2026-10-04T00:00:00", "before": "2026-10-04T12:00:00"}
+	checkQueryInZone(t, e, "America/New_York", window, byDue, "Early bird", "Plan offsite")
+	checkQueryInZone(t, e, "Pacific/Kiritimati", window, byDue, "Plan offsite")
 	checkQuery(t, e, obj{"text": "plant"}, byDue, "Water the plants")
 	checkQuery(t, e, obj{"text": "receipt"}, byDue, "File expenses")
 	checkQuery(t, e, obj{"text": "MELBOURNE"}, byDue, "File expenses")
@@ -776,6 +793,70 @@ func TestVendorProperties(t *testing.T) {
 	e.call("Task/set", obj{"update": obj{bare: obj{"keywords": obj{"nerfjournal:category:Work": true}}}})
 
 	checkTaskInvalid(t, e, obj{"progressUpdated": "2026-09-13"}, "progressUpdated")
+}
+
+func TestUseDefaultAlertsAlwaysReturned(t *testing.T) {
+	e := newEnv(t)
+	id := e.createTask(e.defaultListID(), obj{"title": "plain"})
+	if task := e.getTask(id); task["useDefaultAlerts"] != false {
+		t.Errorf("useDefaultAlerts should default to false on get: %v", task)
+	}
+	props := e.call("Task/get", obj{"ids": []string{id}, "properties": []string{"title"}})["list"].([]any)[0].(obj)
+	if _, has := props["useDefaultAlerts"]; has {
+		t.Error("useDefaultAlerts should not be added when properties are requested without it")
+	}
+}
+
+// TestPrivacyConsistency covers the rule that every Task sharing a uid must
+// agree on "privacy", judged after the whole Task/set has been applied.
+func TestPrivacyConsistency(t *testing.T) {
+	e := newEnv(t)
+	listID := e.defaultListID()
+	inst := func(rid, privacy string) obj {
+		o := obj{"taskListIds": obj{listID: true}, "uid": "series", "title": "instance " + rid,
+			"start": "2026-10-" + rid + "T09:00:00", "recurrenceId": "2026-10-" + rid + "T09:00:00"}
+		if privacy != "" {
+			o["privacy"] = privacy
+		}
+		return o
+	}
+
+	resp := e.call("Task/set", obj{"create": obj{
+		"a": inst("01", "public"), "b": inst("02", "private"), "c": obj{"taskListIds": obj{listID: true}, "title": "unrelated"},
+	}})
+	for _, cid := range []string{"a", "b"} {
+		if typ, props := setErrorProps(t, resp, "notCreated", cid); typ != "invalidProperties" || !slices.Equal(props, []string{"privacy"}) {
+			t.Errorf("conflicting create %s should fail on privacy: %v", cid, resp)
+		}
+	}
+	if resp["created"].(obj)["c"] == nil {
+		t.Errorf("unrelated create should succeed: %v", resp)
+	}
+	checkQuery(t, e, obj{"uid": "series"}, nil)
+
+	resp = e.call("Task/set", obj{"create": obj{"a": inst("01", ""), "b": inst("02", "public")}})
+	created := resp["created"].(obj)
+	if created["a"] == nil || created["b"] == nil {
+		t.Fatalf("consistent creates should succeed: %v", resp)
+	}
+	a := created["a"].(obj)["id"].(string)
+	b := created["b"].(obj)["id"].(string)
+
+	resp = e.call("Task/set", obj{"update": obj{a: obj{"privacy": "private", "title": "changed"}}})
+	if typ, _ := setErrorProps(t, resp, "notUpdated", a); typ != "invalidProperties" {
+		t.Errorf("lone privacy change should fail: %v", resp)
+	}
+	if e.getTask(a)["title"] != "instance 01" {
+		t.Error("failed update should have been unwound entirely")
+	}
+
+	resp = e.call("Task/set", obj{"update": obj{a: obj{"privacy": "private"}, b: obj{"privacy": "private"}}})
+	if resp["notUpdated"] != nil {
+		t.Errorf("updating every instance together should succeed: %v", resp)
+	}
+	if e.getTask(a)["privacy"] != "private" || e.getTask(b)["privacy"] != "private" {
+		t.Error("privacy not applied")
+	}
 }
 
 // TestResultReferences is the "fetching initial data" example from the
