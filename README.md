@@ -2,7 +2,7 @@
 
 A one-page demo client for a [JMAP for Task Lists][draft] server, built to
 show off [TaskMaster](../TaskMaster).  Plain HTML and JavaScript, no build
-step, no framework, and a colour scheme borrowed from Mondrian.
+step, no framework, and only a nod to Mondrian.
 
 [draft]: https://github.com/rjbs/jmap-for-tasks
 
