@@ -16,7 +16,7 @@ Flags:
 | `-listen`   | `127.0.0.1:8080`   | address to listen on                              |
 | `-db`       | `taskmaster.sqlite`| SQLite database path, created on first run        |
 | `-account`  | `rjbs`             | the account id and username served                |
-| `-tz`       | `America/New_York` | zone used to resolve tasks that have no `timeZone`|
+| `-tz`       | `America/New_York` | server-side fallback zone for tasks with no `timeZone` (see below) |
 | `-base-url` | derived per request| public base URL for the Session object's URLs     |
 
 The Session object is at `/.well-known/jmap`, the API at `/jmap`, and the
@@ -53,12 +53,18 @@ something that provides it.
   `cannotCalculateChanges`).
 * Sharing, Principals, and per-user properties.
 
-## Notes on interpretation
+## Notes
 
-* JSCalendar bis §4.2 says a task needs `due` or `start` when `timeZone` is
-  *not* set, contradicting its own changelog.  This server follows the
-  evident intent: a `timeZone` or `showWithoutTime: true` requires a date;
-  a plain undated task is fine.
-* Sorting on `progress` uses the order needs-action, in-process, completed,
-  failed, cancelled, then anything else.  The spec does not define one.
+* Task/query resolves tasks that have no `timeZone` in the zone given by
+  the request's `timeZone` argument (default `Etc/UTC`), for both the
+  `before`/`after` filters and sorting on `due` or `start`, as the draft
+  specifies.  Clients should pass the user's current zone.  The `-tz`
+  flag is used only where no client is asking, currently just the
+  `recurrenceOverridesBefore`/`After` window in Task/get.
+* Every Task sharing a `uid` must agree on `privacy`.  A Task/set that
+  would leave them disagreeing has the offending creates and updates
+  rejected, after the whole request has been applied, so a client can
+  change all instances in one request.
 * Text search uses SQLite FTS5 with the Porter stemmer.
+* The database schema is versioned with `PRAGMA user_version` and migrated
+  on startup.
