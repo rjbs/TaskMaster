@@ -820,3 +820,53 @@ func TestResultReferences(t *testing.T) {
 		t.Errorf("wildcard pointer reference: %v", resps[4].Args)
 	}
 }
+
+// readEvent reads one SSE event from the body and returns its event name
+// and decoded data.
+func readEvent(t *testing.T, body interface{ Read([]byte) (int, error) }) (string, obj) {
+	t.Helper()
+	buf := make([]byte, 4096)
+	n, err := body.Read(buf)
+	if err != nil {
+		t.Fatalf("reading event: %v", err)
+	}
+	var name string
+	var data obj
+	for _, line := range bytes.Split(buf[:n], []byte("\n")) {
+		if rest, ok := bytes.CutPrefix(line, []byte("event: ")); ok {
+			name = string(rest)
+		}
+		if rest, ok := bytes.CutPrefix(line, []byte("data: ")); ok {
+			json.Unmarshal(rest, &data)
+		}
+	}
+	return name, data
+}
+
+func TestEventSourceInitialState(t *testing.T) {
+	e := newEnv(t)
+	taskState := e.call("Task/get", obj{"ids": []string{}})["state"]
+
+	resp, err := http.Get(e.ts.URL + "/jmap/eventsource?types=*&closeafter=no&ping=0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	name, data := readEvent(t, resp.Body)
+	changed, _ := data["changed"].(obj)
+	acct, _ := changed[account].(obj)
+	if name != "state" || acct["Task"] != taskState || acct["TaskList"] == nil || acct["TaskNotification"] != "0" {
+		t.Errorf("initial event: %s %v", name, data)
+	}
+
+	// A closeafter=state client must not be closed by the opening event;
+	// with pinging on it gets a ping as its first byte instead.
+	resp2, err := http.Get(e.ts.URL + "/jmap/eventsource?types=*&closeafter=state&ping=5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if name, data := readEvent(t, resp2.Body); name != "ping" || data["interval"] != 5.0 {
+		t.Errorf("closeafter=state first event: %s %v", name, data)
+	}
+}

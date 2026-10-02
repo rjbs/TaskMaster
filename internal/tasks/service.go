@@ -343,3 +343,22 @@ func filterProperties(obj map[string]any, props []string, hasProps bool) map[str
 	}
 	return out
 }
+
+// States returns the current state string of every data type this service
+// serves, keyed by type name.
+func (s *Service) States(ctx context.Context) (map[string]string, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	states := map[string]string{"TaskNotification": notificationState}
+	for _, typ := range []string{typeTaskList, typeTask} {
+		n, err := tx.State(typ)
+		if err != nil {
+			return nil, err
+		}
+		states[typ] = store.StateString(n)
+	}
+	return states, nil
+}

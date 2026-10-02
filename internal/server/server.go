@@ -194,6 +194,53 @@ func (s *Server) handleEventSource(w http.ResponseWriter, r *http.Request) {
 	sub := s.cfg.Broker.subscribe()
 	defer s.cfg.Broker.unsubscribe(sub)
 
+	eventID := 0
+	sendPing := func() {
+		fmt.Fprintf(w, "event: ping\ndata: {\"interval\": %d}\n\n", pingSeconds)
+		flusher.Flush()
+	}
+	sendState := func(changed map[string]string) bool {
+		if !all {
+			for typ := range changed {
+				if !wanted[typ] {
+					delete(changed, typ)
+				}
+			}
+		}
+		if len(changed) == 0 {
+			return false
+		}
+		eventID++
+		data, _ := json.Marshal(map[string]any{
+			"@type":   "StateChange",
+			"changed": map[string]any{s.cfg.AccountID: changed},
+		})
+		fmt.Fprintf(w, "event: state\nid: %d\ndata: %s\n\n", eventID, data)
+		flusher.Flush()
+		return true
+	}
+
+	// Send something at once: some browsers (Firefox) do not fire the
+	// EventSource "open" event until the first byte of the body arrives.
+	// The current state is the most useful first byte, since a client
+	// that fell behind while disconnected learns so immediately, and it
+	// also covers any change committed between this request arriving
+	// and the subscription above.  A closeafter=state client wants to be
+	// held until a real change, so it gets a ping instead.
+	// -- claude, 2026-10-02
+	if closeAfterState {
+		if pingSeconds > 0 {
+			sendPing()
+		}
+	} else {
+		states, err := s.cfg.Tasks.States(r.Context())
+		if err != nil {
+			s.cfg.Logger.Error("reading states for event source", "error", err)
+			return
+		}
+		sendState(states)
+	}
+
 	var ping <-chan time.Time
 	if pingSeconds > 0 {
 		ticker := time.NewTicker(time.Duration(pingSeconds) * time.Second)
@@ -201,34 +248,14 @@ func (s *Server) handleEventSource(w http.ResponseWriter, r *http.Request) {
 		ping = ticker.C
 	}
 
-	eventID := 0
 	for {
 		select {
 		case <-r.Context().Done():
 			return
 		case <-ping:
-			fmt.Fprintf(w, "event: ping\ndata: {\"interval\": %d}\n\n", pingSeconds)
-			flusher.Flush()
+			sendPing()
 		case <-sub.notify:
-			changed := sub.take()
-			if !all {
-				for typ := range changed {
-					if !wanted[typ] {
-						delete(changed, typ)
-					}
-				}
-			}
-			if len(changed) == 0 {
-				continue
-			}
-			eventID++
-			data, _ := json.Marshal(map[string]any{
-				"@type":   "StateChange",
-				"changed": map[string]any{s.cfg.AccountID: changed},
-			})
-			fmt.Fprintf(w, "event: state\nid: %d\ndata: %s\n\n", eventID, data)
-			flusher.Flush()
-			if closeAfterState {
+			if sendState(sub.take()) && closeAfterState {
 				return
 			}
 		}

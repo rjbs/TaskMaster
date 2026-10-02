@@ -34,7 +34,11 @@ something that provides it.
   sort property in the spec
 * `TaskNotification/*`, always empty: there are no other users to be
   notified about
-* Server-Sent Events push via the event source; no `PushSubscription`
+* Server-Sent Events push via the event source; no `PushSubscription`.
+  On connect the server immediately sends a `state` event carrying the
+  current states (or, for `closeafter=state`, a `ping` if pinging is on),
+  so a client learns at once whether it is behind and browsers that wait
+  for the first byte fire `open` promptly.
 * Result references (`#ids` and friends, RFC 8620 §3.7) and creation
   references (`#creationId`) wherever an id is accepted
 
