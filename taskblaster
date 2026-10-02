@@ -1,0 +1,150 @@
+#!/usr/bin/env perl
+use v5.36;
+
+use Getopt::Long;
+use HTTP::Daemon;
+use HTTP::Status qw(:constants);
+use IO::Socket::INET;
+use Path::Tiny;
+
+=head1 NAME
+
+taskblaster - serve the TaskBlaster page in front of a TaskMaster server
+
+=head1 SYNOPSIS
+
+  taskblaster [-listen 127.0.0.1:8081] [-backend 127.0.0.1:8080] [-root DIR]
+
+=head1 DESCRIPTION
+
+TaskMaster serves JMAP and nothing else: no static files, no CORS.  A browser
+page can only talk to it from the same origin, so this program serves
+F<index.html> from the root directory and forwards everything under C</jmap>
+and C</.well-known/jmap> to the backend, byte for byte.  The backend builds
+the Session object's URLs from the Host header, so that header is passed
+through unchanged and the page ends up talking to this proxy for everything.
+
+=cut
+
+GetOptions(
+  'listen=s'  => \(my $listen  = '127.0.0.1:8081'),
+  'backend=s' => \(my $backend = '127.0.0.1:8080'),
+  'root=s'    => \(my $root    = path(__FILE__)->parent->stringify),
+) or die "usage: $0 [-listen HOST:PORT] [-backend HOST:PORT] [-root DIR]\n";
+
+my ($host, $port) = split /:/, $listen;
+
+my $daemon = HTTP::Daemon->new(
+  LocalAddr => $host,
+  LocalPort => $port,
+  ReuseAddr => 1,
+) or die "can't listen on $listen: $@";
+
+say "TaskBlaster at ", $daemon->url, " for TaskMaster at http://$backend/";
+
+# One child per connection, because the event source connection stays open
+# indefinitely and must not block anybody else. -- claude, 2026-10-02
+$SIG{CHLD} = 'IGNORE';
+$SIG{PIPE} = 'IGNORE';
+
+while (my $conn = $daemon->accept) {
+  my $pid = fork;
+  die "fork failed: $!" unless defined $pid;
+
+  if ($pid) {
+    $conn->close;
+    next;
+  }
+
+  $daemon->close;
+  handle_connection($conn);
+  exit 0;
+}
+
+=head2 handle_connection
+
+  handle_connection($conn);
+
+Serves one request on the client connection, then closes it.  Proxy paths
+are forwarded to the backend; the root path gets F<index.html>; anything
+else is a 404.
+
+=cut
+
+sub handle_connection ($conn) {
+  my $req = $conn->get_request;
+  return unless $req;
+
+  my $path = $req->uri->path;
+
+  if ($path =~ m{\A(?:/jmap(?:/|\z)|/\.well-known/jmap\z)}) {
+    proxy_request($conn, $req);
+  } elsif ($path eq '/' || $path eq '/index.html') {
+    send_file($conn, path($root, 'index.html'), 'text/html; charset=utf-8');
+  } else {
+    $conn->send_error(HTTP_NOT_FOUND);
+  }
+
+  $conn->close;
+}
+
+=head2 send_file
+
+  send_file($conn, $path, $content_type);
+
+Sends the file at C<$path> as a 200 response, or a 404 if it isn't there.
+
+=cut
+
+sub send_file ($conn, $path, $type) {
+  unless ($path->is_file) {
+    $conn->send_error(HTTP_NOT_FOUND, "$path is missing");
+    return;
+  }
+
+  my $res = HTTP::Response->new(HTTP_OK);
+  $res->header('Content-Type' => $type);
+  $res->header('Cache-Control' => 'no-store');
+  $res->content($path->slurp_raw);
+  $conn->send_response($res);
+}
+
+=head2 proxy_request
+
+  proxy_request($conn, $req);
+
+Forwards the request to the backend and streams the backend's reply back to
+the client, headers and all, until one side hangs up.
+
+=cut
+
+sub proxy_request ($conn, $req) {
+  my $upstream = IO::Socket::INET->new(
+    PeerAddr => $backend,
+    Proto    => 'tcp',
+  );
+
+  unless ($upstream) {
+    $conn->send_error(HTTP_BAD_GATEWAY, "can't reach $backend: $!");
+    return;
+  }
+
+  $upstream->autoflush(1);
+  $conn->autoflush(1);
+
+  # We ask the backend to close when it's done, so the end of the response
+  # is simply end of stream and we never need to parse chunked encoding
+  # ourselves.  The reply is relayed verbatim, so the client's own parser
+  # handles whatever framing the backend chose. -- claude, 2026-10-02
+  $req->header(Connection => 'close');
+  $req->protocol('HTTP/1.1');
+  $req->remove_header('Keep-Alive');
+
+  print {$upstream} $req->as_string("\r\n");
+
+  while (my $n = sysread $upstream, my $buf, 65536) {
+    last unless syswrite $conn, $buf;
+  }
+
+  $upstream->close;
+}
