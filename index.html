@@ -274,11 +274,15 @@ function connectPush () {
   const url = S.session.eventSourceUrl
     .replace('{types}', 'Task,TaskList')
     .replace('{closeafter}', 'no')
-    .replace('{ping}', '30');
+    .replace('{ping}', '10');
 
   const es = new EventSource(url);
 
+  // Firefox doesn't fire "open" until the first bytes of the body arrive,
+  // which with a quiet server is the first ping.  So the ping interval is
+  // short, and a ping counts as being connected. -- claude, 2026-10-02
   es.addEventListener('open',  () => setLive(true, 'push connected'));
+  es.addEventListener('ping',  () => setLive(true, 'push connected'));
   es.addEventListener('error', () => setLive(false, 'push disconnected; retrying'));
 
   es.addEventListener('state', (ev) => {
