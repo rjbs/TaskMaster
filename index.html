@@ -274,13 +274,16 @@ function connectPush () {
   const url = S.session.eventSourceUrl
     .replace('{types}', 'Task,TaskList')
     .replace('{closeafter}', 'no')
-    .replace('{ping}', '10');
+    .replace('{ping}', '30');
 
   const es = new EventSource(url);
 
-  // Firefox doesn't fire "open" until the first bytes of the body arrive,
-  // which with a quiet server is the first ping.  So the ping interval is
-  // short, and a ping counts as being connected. -- claude, 2026-10-02
+  // Firefox doesn't fire "open" until the first bytes of the body arrive.
+  // TaskMaster sends a state event as soon as the stream opens, which
+  // covers that; counting a ping as connected is a fallback for servers
+  // that don't.  The state handler below also catches anything that
+  // changed between the initial load and the push connecting.
+  // -- claude, 2026-10-02
   es.addEventListener('open',  () => setLive(true, 'push connected'));
   es.addEventListener('ping',  () => setLive(true, 'push connected'));
   es.addEventListener('error', () => setLive(false, 'push disconnected; retrying'));
