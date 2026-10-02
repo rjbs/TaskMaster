@@ -35,6 +35,8 @@ something that provides it.
 * `TaskNotification/*`, always empty: there are no other users to be
   notified about
 * Server-Sent Events push via the event source; no `PushSubscription`
+* Result references (`#ids` and friends, RFC 8620 §3.7) and creation
+  references (`#creationId`) wherever an id is accepted
 
 ## What is deliberately not implemented
 

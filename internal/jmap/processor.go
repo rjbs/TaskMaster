@@ -2,6 +2,7 @@ package jmap
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -176,6 +177,18 @@ func (c *Context) resolveReferences(args map[string]any) *MethodError {
 		}
 		val, err := ResolvePointer(source.Args, path)
 		if err != nil {
+			return Errorf(ErrInvalidResultReference, "%s: %v", k, err)
+		}
+		// Response arguments are whatever Go values the handler built
+		// ([]string, int64, ...), while handlers parse request arguments
+		// in decoded-JSON shape ([]any, json.Number, ...).  A round trip
+		// through JSON makes the referenced value indistinguishable from
+		// one the client sent.  -- claude, 2026-10-02
+		encoded, merr := json.Marshal(val)
+		if merr != nil {
+			return Errorf(ErrInvalidResultReference, "%s: %v", k, merr)
+		}
+		if val, err = DecodeValue(encoded); err != nil {
 			return Errorf(ErrInvalidResultReference, "%s: %v", k, err)
 		}
 		args[name] = val

@@ -777,3 +777,46 @@ func TestVendorProperties(t *testing.T) {
 
 	checkTaskInvalid(t, e, obj{"progressUpdated": "2026-09-13"}, "progressUpdated")
 }
+
+// TestResultReferences is the "fetching initial data" example from the
+// spec: a Task/query whose ids feed a Task/get through a result reference.
+func TestResultReferences(t *testing.T) {
+	e := newEnv(t)
+	listID := e.defaultListID()
+	e.createTask(listID, obj{"title": "open", "due": "2026-10-05T09:00:00"})
+	e.createTask(listID, obj{"title": "done", "progress": "completed"})
+
+	resps := e.request(
+		jmap.Invocation{Name: "Task/query", CallID: "1", Args: withAccount(obj{
+			"filter": obj{"progress": []string{"needs-action", "in-process"}},
+			"sort":   []obj{{"property": "due"}},
+		})},
+		jmap.Invocation{Name: "Task/get", CallID: "2", Args: withAccount(obj{
+			"#ids": obj{"resultOf": "1", "name": "Task/query", "path": "/ids"},
+		})},
+		jmap.Invocation{Name: "Task/get", CallID: "3", Args: withAccount(obj{
+			"#ids": obj{"resultOf": "1", "name": "Task/query", "path": "/nope"},
+		})},
+		jmap.Invocation{Name: "Task/get", CallID: "4", Args: withAccount(obj{
+			"#ids": obj{"resultOf": "9", "name": "Task/query", "path": "/ids"},
+		})},
+		jmap.Invocation{Name: "Task/get", CallID: "5", Args: withAccount(obj{
+			"#ids": obj{"resultOf": "2", "name": "Task/get", "path": "/list/*/id"},
+		})},
+	)
+	if resps[1].Name != "Task/get" {
+		t.Fatalf("result reference failed: %v", resps[1].Args)
+	}
+	list := resps[1].Args["list"].([]any)
+	if len(list) != 1 || list[0].(obj)["title"] != "open" {
+		t.Errorf("Task/get via #ids: %v", list)
+	}
+	for _, r := range resps[2:4] {
+		if r.Name != "error" || r.Args["type"] != "invalidResultReference" {
+			t.Errorf("call %s should fail with invalidResultReference: %v", r.CallID, r.Args)
+		}
+	}
+	if resps[4].Name != "Task/get" || len(resps[4].Args["list"].([]any)) != 1 {
+		t.Errorf("wildcard pointer reference: %v", resps[4].Args)
+	}
+}
