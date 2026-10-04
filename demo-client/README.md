@@ -1,7 +1,7 @@
 # TaskBlaster
 
 A one-page demo client for a [JMAP for Task Lists][draft] server, built to
-show off [TaskMaster](../TaskMaster).  Plain HTML and JavaScript, no build
+show off [TaskMaster](..), the server this repository is mostly about.  Plain HTML and JavaScript, no build
 step, no framework, and only a nod to Mondrian.
 
 [draft]: https://github.com/rjbs/jmap-for-tasks

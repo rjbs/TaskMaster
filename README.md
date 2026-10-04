@@ -26,6 +26,9 @@ TaskList named "Tasks" is created.
 There is no authentication yet.  Bind to localhost or put it behind
 something that provides it.
 
+A one-page demo client, TaskBlaster, lives in [`demo-client/`](demo-client/)
+along with a small proxy that serves it in front of the server.
+
 ## What is implemented
 
 * `TaskList/get`, `/changes`, `/set` (including `onDestroyRemoveTasks` and
