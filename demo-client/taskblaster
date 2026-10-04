@@ -40,7 +40,7 @@ my $daemon = HTTP::Daemon->new(
   ReuseAddr => 1,
 ) or die "can't listen on $listen: $@";
 
-say "TaskBlaster at ", $daemon->url, " for TaskMaster at http://$backend/";
+say "TaskBlaster at ", $daemon->url, " (forwarding JMAP to $backend)";
 
 # One child per connection, because the event source connection stays open
 # indefinitely and must not block anybody else. -- claude, 2026-10-02
@@ -56,25 +56,26 @@ while (my $conn = $daemon->accept) {
     next;
   }
 
+  # Read the request before closing our copy of the listening socket:
+  # HTTP::Daemon builds the request's URI from that socket's address, and
+  # warns about undefined values once it is closed. -- claude, 2026-10-04
+  my $req = $conn->get_request;
   $daemon->close;
-  handle_connection($conn);
+  handle_connection($conn, $req) if $req;
   exit 0;
 }
 
 =head2 handle_connection
 
-  handle_connection($conn);
+  handle_connection($conn, $req);
 
-Serves one request on the client connection, then closes it.  Proxy paths
-are forwarded to the backend; the root path gets F<index.html>; anything
-else is a 404.
+Serves the already-read request on the client connection, then closes it.
+Proxy paths are forwarded to the backend; the root path gets F<index.html>;
+anything else is a 404.
 
 =cut
 
-sub handle_connection ($conn) {
-  my $req = $conn->get_request;
-  return unless $req;
-
+sub handle_connection ($conn, $req) {
   my $path = $req->uri->path;
 
   if ($path =~ m{\A(?:/jmap(?:/|\z)|/\.well-known/jmap\z)}) {
