@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TaskBlaster</title>
+<style>
+  :root {
+    --red:   #d40920;
+    --blue:  #1356a2;
+    --black: #000;
+    --grey:  #888;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0 auto;
+    padding: 24px 16px;
+    max-width: 880px;
+    color: var(--black);
+    background: #fff;
+    font: 15px/1.4 Helvetica, Arial, sans-serif;
+  }
+
+  .top {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    border-bottom: 3px solid var(--black);
+    padding-bottom: 8px;
+    margin-bottom: 20px;
+  }
+  .top h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; }
+
+  .live { margin-left: auto; font-size: 12px; color: var(--grey); }
+  .live::before {
+    content: "";
+    display: inline-block;
+    width: 10px; height: 10px;
+    margin-right: 6px;
+    vertical-align: -1px;
+    background: var(--blue);
+  }
+  .live.off::before { background: var(--red); }
+  .live small { display: none; }
+
+  .cols { display: grid; grid-template-columns: 180px 1fr; gap: 32px; }
+  @media (max-width: 600px) { .cols { grid-template-columns: 1fr; } }
+
+  h2 {
+    margin: 0 0 8px;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--grey);
+  }
+
+  .lists ul, .tasks ul { list-style: none; margin: 0; padding: 0; }
+
+  .lists li { display: flex; align-items: center; }
+  .lists li button.pick { flex: 1; text-align: left; border: 0; padding: 4px 0; }
+  .lists li.selected button.pick { font-weight: 700; }
+  .lists form { display: flex; gap: 6px; margin-top: 12px; }
+  .lists form input { flex: 1; min-width: 0; }
+
+  .tasks header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .tasks header label { font-size: 12px; color: var(--grey); white-space: nowrap; }
+
+  .tasks li {
+    display: grid;
+    grid-template-columns: auto 1fr auto auto;
+    gap: 10px;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--black);
+  }
+  .tasks li .name { cursor: text; min-width: 0; overflow-wrap: anywhere; }
+  .tasks li .name input { width: 100%; }
+  .tasks li.done .name { text-decoration: line-through; color: var(--grey); }
+  .tasks li .due { font-size: 12px; color: var(--grey); white-space: nowrap; }
+  .tasks li.overdue .due { color: var(--red); }
+  .tasks .empty { color: var(--grey); font-style: italic; }
+
+  .add { display: flex; gap: 6px; margin-top: 16px; }
+  .add input[name=title] { flex: 1; min-width: 0; }
+
+  .error { margin-top: 12px; color: var(--red); font-weight: 700; }
+  .error:empty { display: none; }
+
+  input, button {
+    font: inherit;
+    border: 1px solid var(--black);
+    border-radius: 0;
+    background: #fff;
+    color: var(--black);
+    padding: 4px 8px;
+    margin: 0;
+  }
+  input:focus, button:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+  button { cursor: pointer; }
+  button.quiet { border: 0; padding: 0 6px; color: var(--grey); font-size: 18px; line-height: 1; }
+  button.quiet:hover { color: var(--red); }
+
+  input[type=checkbox] {
+    appearance: none;
+    width: 16px; height: 16px;
+    padding: 0;
+    cursor: pointer;
+    vertical-align: middle;
+  }
+  input[type=checkbox]:checked { background: var(--blue); }
+</style>
+</head>
+<body>
+  <header class="top">
+    <h1>TaskBlaster</h1>
+    <span class="live off" id="live">Offline<small id="live-detail">connecting…</small></span>
+  </header>
+
+  <div class="cols">
+    <aside class="lists">
+      <h2>Lists</h2>
+      <ul id="lists"></ul>
+      <form id="add-list">
+        <input name="name" placeholder="New list" required autocomplete="off">
+        <button type="submit">Add</button>
+      </form>
+    </aside>
+
+    <main class="tasks">
+      <header>
+        <h2 id="tasks-title">Tasks</h2>
+        <label><input type="checkbox" id="show-done"> Show completed</label>
+      </header>
+      <ul id="tasks"></ul>
+      <p class="empty" id="empty" hidden>Nothing to do.</p>
+      <form id="add-task" class="add">
+        <input name="title" placeholder="What needs doing?" required autocomplete="off">
+        <input name="due" type="date" title="Due date">
+        <button type="submit">Add</button>
+      </form>
+      <div class="error" id="error"></div>
+    </main>
+  </div>
+
+<script>
+'use strict';
+
+const CORE  = 'urn:ietf:params:jmap:core';
+const TASKS = 'urn:ietf:params:jmap:tasks';
+const TZ    = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+const S = {
+  session:   null,
+  accountId: null,
+  lists:     [],
+  tasks:     [],
+  listId:    null,   // null means "every list"
+  showDone:  false,
+  listState: null,
+  taskState: null,
+};
+
+const $ = (id) => document.getElementById(id);
+
+function el (tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class')            node.className = v;
+    else if (k.startsWith('on'))  node.addEventListener(k.slice(2), v);
+    else if (v === true)          node.setAttribute(k, '');
+    else if (v !== false && v != null) node.setAttribute(k, v);
+  }
+  node.append(...children);
+  return node;
+}
+
+function showError (err) {
+  console.error(err);
+  $('error').textContent = err?.message ?? String(err);
+}
+
+function clearError () { $('error').textContent = ''; }
+
+// ---- JMAP -----------------------------------------------------------------
+
+async function request (methodCalls) {
+  const res = await fetch(S.session.apiUrl, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ using: [CORE, TASKS], methodCalls }),
+  });
+  if (!res.ok) throw new Error(`JMAP request failed: HTTP ${res.status}`);
+  return (await res.json()).methodResponses;
+}
+
+// Several method calls in one request.  Each gets the accountId filled in
+// and is tagged with its index; a method-level error becomes an exception.
+async function calls (...methodCalls) {
+  const responses = await request(methodCalls.map(([name, args], i) => [name, { accountId: S.accountId, ...args }, String(i)]));
+  return responses.map(([resName, resArgs], i) => {
+    if (resName === 'error') {
+      throw new Error(`${methodCalls[i][0]}: ${resArgs.type}${resArgs.description ? ` (${resArgs.description})` : ''}`);
+    }
+    return resArgs;
+  });
+}
+
+async function call (name, args) {
+  const [res] = await calls([name, args]);
+  return res;
+}
+
+// A /set call, with any per-object SetError turned into an exception.
+async function set (type, args) {
+  const res = await call(`${type}/set`, args);
+  for (const key of ['notCreated', 'notUpdated', 'notDestroyed']) {
+    for (const [id, err] of Object.entries(res[key] ?? {})) {
+      throw new Error(`${type} ${id} ${key}: ${err.type}${err.description ? ` (${err.description})` : ''}`);
+    }
+  }
+  return res;
+}
+
+// ---- Loading --------------------------------------------------------------
+
+async function loadLists () {
+  const res = await call('TaskList/get', { ids: null });
+  S.listState = res.state;
+  S.lists = res.list.sort((a, b) => (a.sortOrder - b.sortOrder) || a.name.localeCompare(b.name));
+  if (S.listId && !S.lists.some(l => l.id === S.listId)) S.listId = null;
+  renderLists();
+}
+
+async function loadTasks () {
+  const filter = {};
+  if (S.listId)   filter.inTaskList = S.listId;
+  if (!S.showDone) filter.progress = ['needs-action', 'in-process'];
+
+  const [query, got] = await calls(
+    ['Task/query', {
+      filter,
+      sort: [{ property: 'due' }, { property: 'created' }],
+      timeZone: TZ,
+    }],
+    ['Task/get', {
+      '#ids': { resultOf: '0', name: 'Task/query', path: '/ids' },
+    }],
+  );
+  const byId = new Map(got.list.map(t => [t.id, t]));
+
+  S.taskState = got.state;
+  S.tasks = query.ids.map(id => byId.get(id)).filter(Boolean);
+  renderTasks();
+}
+
+async function reload () {
+  clearError();
+  await loadLists();
+  await loadTasks();
+}
+
+// ---- Push -----------------------------------------------------------------
+
+function setLive (on, detail) {
+  $('live').classList.toggle('off', !on);
+  $('live').firstChild.textContent = on ? 'Live' : 'Offline';
+  $('live-detail').textContent = detail;
+}
+
+function connectPush () {
+  const url = S.session.eventSourceUrl
+    .replace('{types}', 'Task,TaskList')
+    .replace('{closeafter}', 'no')
+    .replace('{ping}', '30');
+
+  const es = new EventSource(url);
+
+  // Firefox doesn't fire "open" until the first bytes of the body arrive.
+  // TaskMaster sends a state event as soon as the stream opens, which
+  // covers that; counting a ping as connected is a fallback for servers
+  // that don't.  The state handler below also catches anything that
+  // changed between the initial load and the push connecting.
+  // -- claude, 2026-10-02
+  es.addEventListener('open',  () => setLive(true, 'push connected'));
+  es.addEventListener('ping',  () => setLive(true, 'push connected'));
+  es.addEventListener('error', () => setLive(false, 'push disconnected; retrying'));
+
+  es.addEventListener('state', (ev) => {
+    const changed = JSON.parse(ev.data).changed?.[S.accountId] ?? {};
+    const work = [];
+    if (changed.TaskList && changed.TaskList !== S.listState) work.push(loadLists());
+    if (changed.Task     && changed.Task     !== S.taskState) work.push(loadTasks());
+    Promise.all(work).catch(showError);
+  });
+}
+
+// ---- Actions --------------------------------------------------------------
+
+function defaultListId () {
+  return S.listId ?? S.lists.find(l => l.isDefault)?.id ?? S.lists[0]?.id;
+}
+
+async function createTask (title, due) {
+  const listId = defaultListId();
+  if (!listId) throw new Error('There is no task list to put this in.');
+
+  const task = { taskListIds: { [listId]: true }, title };
+  if (due) {
+    task.due = `${due}T00:00:00`;
+    task.showWithoutTime = true;
+  }
+
+  await set('Task', { create: { new: task } });
+  await loadTasks();
+}
+
+async function setDone (task, done) {
+  const patch = done
+    ? { progress: 'completed',    percentComplete: 100  }
+    : { progress: 'needs-action', percentComplete: null };
+  await set('Task', { update: { [task.id]: patch } });
+  await loadTasks();
+}
+
+async function renameTask (task, title) {
+  if (title === task.title) return renderTasks();
+  await set('Task', { update: { [task.id]: { title } } });
+  await loadTasks();
+}
+
+async function destroyTask (task) {
+  await set('Task', { destroy: [task.id] });
+  await loadTasks();
+}
+
+async function createList (name) {
+  await set('TaskList', { create: { new: { name } } });
+  await loadLists();
+}
+
+async function destroyList (list) {
+  if (!confirm(`Delete the list "${list.name}" and every task in it?`)) return;
+  await set('TaskList', { destroy: [list.id], onDestroyRemoveTasks: true });
+  await reload();
+}
+
+// ---- Rendering ------------------------------------------------------------
+
+function renderLists () {
+  const ul = $('lists');
+  ul.replaceChildren();
+
+  const item = (label, id, list) => el('li', { class: id === S.listId ? 'selected' : '' },
+    el('button', { class: 'pick', type: 'button', onclick: () => { S.listId = id; renderLists(); loadTasks().catch(showError); } }, label),
+    ...(list?.myRights.mayDelete
+      ? [ el('button', { class: 'quiet', type: 'button', title: 'Delete list', onclick: () => destroyList(list).catch(showError) }, '×') ]
+      : []),
+  );
+
+  ul.append(item('All tasks', null));
+  for (const list of S.lists) ul.append(item(list.name, list.id, list));
+
+  const current = S.lists.find(l => l.id === S.listId);
+  $('tasks-title').textContent = current ? current.name : 'All tasks';
+}
+
+function formatDue (task) {
+  const when = new Date(task.due);
+  const opts = { month: 'short', day: 'numeric' };
+  if (when.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+  if (!task.showWithoutTime) { opts.hour = 'numeric'; opts.minute = '2-digit'; }
+  return when.toLocaleString(undefined, opts);
+}
+
+function isOverdue (task) {
+  if (!task.due || task.progress === 'completed') return false;
+  const when = new Date(task.due);
+  if (task.showWithoutTime) when.setHours(23, 59, 59, 999);
+  return when < new Date();
+}
+
+function renderTasks () {
+  const ul = $('tasks');
+  ul.replaceChildren();
+  $('empty').hidden = S.tasks.length > 0;
+
+  for (const task of S.tasks) {
+    const done = task.progress === 'completed';
+
+    const name = el('span', { class: 'name', title: 'Click to edit' }, task.title ?? '(untitled)');
+    name.addEventListener('click', () => editTitle(task, name));
+
+    const listNames = Object.keys(task.taskListIds)
+      .map(id => S.lists.find(l => l.id === id)?.name)
+      .filter(Boolean);
+
+    ul.append(el('li', { class: [done ? 'done' : '', isOverdue(task) ? 'overdue' : ''].join(' ') },
+      el('input', { type: 'checkbox', checked: done, title: done ? 'Mark not done' : 'Mark done',
+                    onchange: (ev) => setDone(task, ev.target.checked).catch(showError) }),
+      name,
+      el('span', { class: 'due' },
+        task.due ? formatDue(task) : '',
+        S.listId ? '' : el('span', { class: 'in' }, task.due ? ' · ' : '', listNames.join(', '))),
+      el('button', { class: 'quiet', type: 'button', title: 'Delete task',
+                     onclick: () => destroyTask(task).catch(showError) }, '×'),
+    ));
+  }
+}
+
+function editTitle (task, name) {
+  const input = el('input', { type: 'text', value: task.title ?? '' });
+  let finished = false;
+  const finish = (save) => {
+    if (finished) return;
+    finished = true;
+    (save ? renameTask(task, input.value.trim() || task.title) : Promise.resolve(renderTasks())).catch(showError);
+  };
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter')  finish(true);
+    if (ev.key === 'Escape') finish(false);
+  });
+  input.addEventListener('blur', () => finish(true));
+  name.replaceChildren(input);
+  input.focus();
+  input.select();
+}
+
+// ---- Wiring ---------------------------------------------------------------
+
+$('add-task').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const form = ev.target;
+  const title = form.elements.title.value.trim();
+  if (!title) return;
+  createTask(title, form.elements.due.value).then(() => { form.reset(); form.elements.title.focus(); }).catch(showError);
+});
+
+$('add-list').addEventListener('submit', (ev) => {
+  ev.preventDefault();
+  const form = ev.target;
+  const name = form.elements.name.value.trim();
+  if (!name) return;
+  createList(name).then(() => form.reset()).catch(showError);
+});
+
+$('show-done').addEventListener('change', (ev) => {
+  S.showDone = ev.target.checked;
+  loadTasks().catch(showError);
+});
+
+async function main () {
+  const res = await fetch('/.well-known/jmap');
+  if (!res.ok) throw new Error(`Couldn't fetch the Session object: HTTP ${res.status}`);
+  S.session = await res.json();
+  S.accountId = S.session.primaryAccounts[TASKS];
+  if (!S.accountId) throw new Error('The session has no account with the tasks capability.');
+
+  await reload();
+  connectPush();
+}
+
+main().catch(showError);
+</script>
+</body>
+</html>
