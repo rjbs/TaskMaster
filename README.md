@@ -65,6 +65,10 @@ something that provides it.
   would leave them disagreeing has the offending creates and updates
   rejected, after the whole request has been applied, so a client can
   change all instances in one request.
+* Creating a Task whose `uid` (and `recurrenceId`) is already in use fails
+  with an `alreadyExists` SetError carrying `existingId`, the shape RFC
+  8620 defines for `/copy`.  A retried create whose first response was
+  lost can recover its task from that.  The draft does not yet say this.
 * Text search uses SQLite FTS5 with the Porter stemmer.
 * The database schema is versioned with `PRAGMA user_version` and migrated
   on startup.

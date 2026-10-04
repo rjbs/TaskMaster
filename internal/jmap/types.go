@@ -133,6 +133,7 @@ type SetError struct {
 	Type        string   `json:"type"`
 	Description string   `json:"description,omitempty"`
 	Properties  []string `json:"properties,omitempty"`
+	ExistingID  string   `json:"existingId,omitempty"`
 }
 
 func (e *SetError) Error() string {
@@ -150,12 +151,20 @@ const (
 	SetErrWillDestroy       = "willDestroy"
 	SetErrInvalidProperties = "invalidProperties"
 	SetErrSingleton         = "singleton"
+	SetErrAlreadyExists     = "alreadyExists"
 )
 
 // InvalidProperties builds an invalidProperties SetError naming the
 // offending properties.
 func InvalidProperties(desc string, props ...string) *SetError {
 	return &SetError{Type: SetErrInvalidProperties, Description: desc, Properties: props}
+}
+
+// AlreadyExists is the SetError for a create that duplicates an existing
+// record.  RFC 8620 §5.4 defines it for /copy; it carries the id of the
+// record that already exists.
+func AlreadyExists(desc, existingID string) *SetError {
+	return &SetError{Type: SetErrAlreadyExists, Description: desc, ExistingID: existingID}
 }
 
 // NotFound is the SetError for an unknown id.

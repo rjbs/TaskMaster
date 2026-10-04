@@ -453,8 +453,22 @@ func TestTaskValidation(t *testing.T) {
 	checkTaskInvalid(t, e, obj{"keywords": obj{"a": false}}, "keywords")
 	checkTaskInvalid(t, e, obj{"uid": ""}, "uid")
 
-	e.createTask(listID, obj{"uid": "dup", "title": "first"})
-	checkTaskInvalid(t, e, obj{"uid": "dup", "title": "second"}, "uid")
+	// Creating with a uid already in use is reported as alreadyExists with
+	// the id of the existing task, so a retried create can recover it.
+	// Moving an existing task onto a used uid is just an invalid patch.
+	first := e.createTask(listID, obj{"uid": "dup", "title": "first"})
+	resp := e.call("Task/set", obj{"create": obj{"x": obj{"taskListIds": obj{listID: true}, "uid": "dup", "title": "second"}}})
+	se, _ := resp["notCreated"].(obj)["x"].(obj)
+	if se["type"] != "alreadyExists" || se["existingId"] != first {
+		t.Errorf("duplicate uid on create: %v", resp["notCreated"])
+	}
+	other := e.createTask(listID, obj{"uid": "other", "title": "third"})
+	resp = e.call("Task/set", obj{"update": obj{other: obj{"uid": "dup"}}})
+	if typ, props := setErrorProps(t, resp, "notUpdated", other); typ != "invalidProperties" || !slices.Equal(props, []string{"uid"}) {
+		t.Errorf("duplicate uid on update: %v", resp["notUpdated"])
+	}
+	// A different recurrenceId makes it a different task, not a duplicate.
+	e.createTask(listID, obj{"uid": "dup", "title": "instance", "start": "2026-10-04T09:00:00", "recurrenceId": "2026-10-04T09:00:00"})
 }
 
 // checkQuery runs Task/query in America/New_York with filter and sort and

@@ -386,17 +386,21 @@ func touchTask(tx *store.Tx, id string) error {
 	return err
 }
 
-// uidInUse reports whether another live task has the same uid and
-// recurrenceId, which the spec forbids within an account.
-func uidInUse(tx *store.Tx, uid string, recurrenceID *string, exceptID string) (bool, error) {
+// existingTaskWithUID returns the id of the live task, other than exceptID,
+// that has the given uid and recurrenceId, or "" if there is none.  The
+// spec forbids two such tasks within an account.
+func existingTaskWithUID(tx *store.Tx, uid string, recurrenceID *string, exceptID string) (string, error) {
 	rid := ""
 	if recurrenceID != nil {
 		rid = *recurrenceID
 	}
-	var n int
-	err := tx.QueryRow(`SELECT COUNT(*) FROM tasks WHERE uid = ? AND COALESCE(recurrence_id, '') = ?
-		AND destroyed_modseq IS NULL AND id != ?`, uid, rid, exceptID).Scan(&n)
-	return n > 0, err
+	var id string
+	err := tx.QueryRow(`SELECT id FROM tasks WHERE uid = ? AND COALESCE(recurrence_id, '') = ?
+		AND destroyed_modseq IS NULL AND id != ?`, uid, rid, exceptID).Scan(&id)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return id, err
 }
 
 // extractTaskListIDs validates and removes "taskListIds" from obj, resolving
@@ -817,12 +821,14 @@ func (s *Service) createTask(c *jmap.Context, tx *store.Tx, props map[string]any
 	if rid, ok := obj["recurrenceId"].(string); ok {
 		t.RecurrenceID = &rid
 	}
-	inUse, err := uidInUse(tx, t.UID, t.RecurrenceID, t.ID)
+	// A create that collides on uid is most often a retry whose first
+	// response was lost, so tell the client which task it already made.
+	existing, err := existingTaskWithUID(tx, t.UID, t.RecurrenceID, t.ID)
 	if err != nil {
 		return nil, nil, err
 	}
-	if inUse {
-		return nil, jmap.InvalidProperties("a task with this uid and recurrenceId already exists", "uid"), nil
+	if existing != "" {
+		return nil, jmap.AlreadyExists("a task with this uid and recurrenceId already exists", existing), nil
 	}
 	return t, nil, s.writeTask(tx, t, true)
 }
@@ -863,11 +869,11 @@ func (s *Service) updateTask(c *jmap.Context, tx *store.Tx, id string, patch map
 	if rid, ok := obj["recurrenceId"].(string); ok {
 		t.RecurrenceID = &rid
 	}
-	inUse, err := uidInUse(tx, t.UID, t.RecurrenceID, t.ID)
+	existing, err := existingTaskWithUID(tx, t.UID, t.RecurrenceID, t.ID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if inUse {
+	if existing != "" {
 		return nil, nil, jmap.InvalidProperties("a task with this uid and recurrenceId already exists", "uid"), nil
 	}
 	return t, prev, nil, s.writeTask(tx, t, false)
