@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -63,6 +64,8 @@ func run(logger *slog.Logger, configPath string) error {
 	sort.Strings(ids)
 	for _, id := range ids {
 		acct := cfg.Directory.Accounts[id]
+		_, statErr := os.Stat(acct.Path)
+		fresh := errors.Is(statErr, fs.ErrNotExist)
 		db, err := store.Open(acct.Path)
 		if err != nil {
 			return fmt.Errorf("opening database for account %q: %w", id, err)
@@ -74,7 +77,11 @@ func run(logger *slog.Logger, configPath string) error {
 		}
 		db.OnCommit(broker.Publisher(id))
 		reg.Add(svc)
-		logger.Info("account", "id", id, "owner", acct.Owner, "db", acct.Path)
+		if fresh {
+			logger.Warn("account database did not exist; created an empty one", "id", id, "owner", acct.Owner, "db", acct.Path)
+		} else {
+			logger.Info("account", "id", id, "owner", acct.Owner, "db", acct.Path)
+		}
 	}
 
 	proc := jmap.NewProcessor()
