@@ -56,7 +56,11 @@ the refusal is logged with the login so you can add it.
 The first start must authorize the node: set `TS_AUTHKEY` to an auth key,
 or watch the log for a login URL to visit.  Node state is kept in
 `tailscale.dir` (default `<dataDir>/tailscale`) so later starts need
-nothing.
+nothing.  Do not copy that state between machines of different
+operating systems: the coordination server notices the OS change and
+refuses the node, which shows up in the log as a health warning.  Start
+with an empty state directory on the new machine and authorize it again,
+after deleting the old node in the admin console so the name is free.
 
 ### Upgrading from the single-database version
 
