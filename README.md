@@ -37,7 +37,7 @@ method call naming any other account fails with `accountNotFound`.
 | `baseUrl`   | derived per request| public base URL for the Session object URLs       |
 | `timeZone`  | `America/New_York` | server-side fallback zone for tasks with no `timeZone` (see below) |
 | `dataDir`   | the config file dir| where `<account>.sqlite` files live unless an account gives a `path` |
-| `tailscale` | absent             | `{ "hostname": ..., "dir": ... }`; see below      |
+| `tailscale` | absent             | `{ "hostname": ..., "dir": ..., "https": ... }`; see below |
 
 Relative paths are resolved against the directory holding the config file.
 
@@ -47,7 +47,9 @@ With a `tailscale` section, the server joins your tailnet as its own node
 (via tsnet, in userspace, so no `tailscaled` is needed on the host) and
 serves HTTPS on `https://<hostname>.<tailnet>.ts.net/`, with a certificate
 Tailscale obtains for it.  That requires HTTPS to be enabled in the
-tailnet admin console.  Requests are authenticated by the connecting
+tailnet admin console.  With `"https": false` it serves plain HTTP on
+port 80 instead; the tailnet still encrypts the traffic, but iOS clients
+will want the real thing.  Requests are authenticated by the connecting
 node's login name; tagged nodes and logins no user holds are refused, and
 the refusal is logged with the login so you can add it.
 

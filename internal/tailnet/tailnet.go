@@ -57,11 +57,23 @@ func Start(ctx context.Context, hostname, dir string, logger *slog.Logger) (*Nod
 	return n, nil
 }
 
-// ListenTLS listens for HTTPS on port 443 of the node, with a certificate
-// Tailscale obtains for the node's MagicDNS name.  This needs HTTPS enabled
-// in the tailnet's admin console.
-func (n *Node) ListenTLS() (net.Listener, error) {
-	return n.srv.ListenTLS("tcp", ":443")
+// Listen listens on the node: with https, for HTTPS on port 443 with a
+// certificate Tailscale obtains for the node's MagicDNS name, which needs
+// HTTPS certificates enabled in the tailnet admin console; otherwise for
+// plain HTTP on port 80.
+func (n *Node) Listen(https bool) (net.Listener, error) {
+	if https {
+		return n.srv.ListenTLS("tcp", ":443")
+	}
+	return n.srv.Listen("tcp", ":80")
+}
+
+// URL is the base URL clients should use for the node.
+func (n *Node) URL(https bool) string {
+	if https {
+		return "https://" + n.DNSName + "/"
+	}
+	return "http://" + n.DNSName + "/"
 }
 
 // WhoIs resolves a connection's remote address to the Tailscale identity

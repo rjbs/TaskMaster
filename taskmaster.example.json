@@ -2,7 +2,7 @@
   "listen": "127.0.0.1:8080",
   "timeZone": "America/New_York",
   "dataDir": "data",
-  "tailscale": { "hostname": "taskmaster" },
+  "tailscale": { "hostname": "taskmaster", "https": true },
   "users": {
     "rjbs": {
       "credentials": [

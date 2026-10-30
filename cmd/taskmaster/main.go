@@ -119,14 +119,14 @@ func run(logger *slog.Logger, configPath string) error {
 			return fmt.Errorf("joining tailnet: %w", err)
 		}
 		defer node.Close()
-		ln, err := node.ListenTLS()
+		ln, err := node.Listen(*ts.HTTPS)
 		if err != nil {
 			return fmt.Errorf("tailnet listener: %w", err)
 		}
 		reject := func(r *http.Request, why string) {
 			logger.Warn("refused tailscale request", "from", r.RemoteAddr, "why", why)
 		}
-		logger.Info("listening on tailnet", "url", "https://"+node.DNSName+"/")
+		logger.Info("listening on tailnet", "url", node.URL(*ts.HTTPS))
 		serve("tailnet", ln, auth.Tailscale(cfg.Directory, node.WhoIs, reject, srv))
 	}
 

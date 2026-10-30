@@ -7,7 +7,7 @@
 //	  "baseUrl": "",
 //	  "timeZone": "America/New_York",
 //	  "dataDir": "data",
-//	  "tailscale": { "hostname": "taskmaster", "dir": "tailscale" },
+//	  "tailscale": { "hostname": "taskmaster", "dir": "tailscale", "https": true },
 //	  "users": {
 //	    "rjbs": {
 //	      "credentials": [
@@ -68,6 +68,12 @@ type Tailscale struct {
 
 	// Dir holds the node's state (keys and the like) between runs.
 	Dir string `json:"dir"`
+
+	// HTTPS, which defaults to true, serves TLS on port 443 with a
+	// certificate from Tailscale; that needs HTTPS certificates enabled
+	// in the tailnet admin console.  False serves plain HTTP on port 80,
+	// which the tailnet still encrypts on the wire.
+	HTTPS *bool `json:"https"`
 }
 
 type User struct {
@@ -145,6 +151,10 @@ func Parse(raw []byte, baseDir string) (*Config, error) {
 			cfg.Tailscale.Dir = filepath.Join(cfg.DataDir, "tailscale")
 		}
 		cfg.Tailscale.Dir = resolve(cfg.Tailscale.Dir)
+		if cfg.Tailscale.HTTPS == nil {
+			t := true
+			cfg.Tailscale.HTTPS = &t
+		}
 	}
 
 	users := map[string]*auth.User{}
