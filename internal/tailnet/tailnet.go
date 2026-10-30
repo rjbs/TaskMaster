@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"time"
 
 	"tailscale.com/client/local"
 	"tailscale.com/tsnet"
@@ -40,12 +41,14 @@ func Start(ctx context.Context, hostname, dir string, logger *slog.Logger) (*Nod
 			logger.Debug("tailscale: " + fmt.Sprintf(format, args...))
 		},
 	}
-	status, err := srv.Up(ctx)
+	lc, err := srv.LocalClient()
 	if err != nil {
 		srv.Close()
 		return nil, err
 	}
-	lc, err := srv.LocalClient()
+	stopReporting := reportWhileStarting(ctx, lc, logger)
+	status, err := srv.Up(ctx)
+	stopReporting()
 	if err != nil {
 		srv.Close()
 		return nil, err
@@ -92,6 +95,40 @@ func (n *Node) WhoIs(ctx context.Context, remoteAddr string) (auth.Identity, err
 
 func (n *Node) Close() error {
 	return n.srv.Close()
+}
+
+// reportWhileStarting logs the node's backend state and health problems
+// every few seconds until the returned function is called.  tsnet's Up
+// blocks silently while the node cannot reach the control server, and
+// its own logs are too chatty to show by default, so without this a node
+// stuck in Starting looks exactly like one that is fine.  -- claude, 2026-10-30
+func reportWhileStarting(ctx context.Context, lc *local.Client, logger *slog.Logger) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			st, err := lc.StatusWithoutPeers(ctx)
+			if err != nil {
+				if ctx.Err() == nil {
+					logger.Warn("tailscale node not yet running", "error", err)
+				}
+				continue
+			}
+			logger.Warn("tailscale node not yet running", "state", st.BackendState, "health", st.Health, "authURL", st.AuthURL)
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 func trimDot(s string) string {
