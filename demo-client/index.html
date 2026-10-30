@@ -62,6 +62,7 @@
   .lists li { display: flex; align-items: center; }
   .lists li button.pick { flex: 1; text-align: left; border: 0; padding: 4px 0; }
   .lists li.selected button.pick { font-weight: 700; }
+  .lists li button.pick .dot { margin-right: 8px; }
   .lists form { display: flex; gap: 6px; margin-top: 12px; }
   .lists form input { flex: 1; min-width: 0; }
 
@@ -81,6 +82,8 @@
   .tasks li.done .name { text-decoration: line-through; color: var(--grey); }
   .tasks li .due { font-size: 12px; color: var(--grey); white-space: nowrap; }
   .tasks li.overdue .due { color: var(--red); }
+  .tasks li .in .dot { width: 8px; height: 8px; margin: 0 4px 0 6px; }
+  .tasks li .in .dot:first-child { margin-left: 0; }
   .tasks .empty { color: var(--grey); font-style: italic; }
 
   .add { display: flex; gap: 6px; margin-top: 16px; }
@@ -111,6 +114,15 @@
     vertical-align: middle;
   }
   input[type=checkbox]:checked { background: var(--blue); }
+
+  .dot {
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    vertical-align: -1px;
+    background: var(--grey);
+  }
+  .dot.none { background: transparent; box-shadow: inset 0 0 0 1px var(--grey); }
 </style>
 </head>
 <body>
@@ -175,6 +187,14 @@ function el (tag, attrs = {}, ...children) {
   }
   node.append(...children);
   return node;
+}
+
+// A list's color as a small solid circle.  A list with no color gets a hollow
+// ring so that rows and sidebar entries still line up. -- claude, 2026-10-30
+function dot (list) {
+  return list?.color
+    ? el('span', { class: 'dot', style: `background: ${list.color}` })
+    : el('span', { class: 'dot none' });
 }
 
 function showError (err) {
@@ -354,7 +374,8 @@ function renderLists () {
   ul.replaceChildren();
 
   const item = (label, id, list) => el('li', { class: id === S.listId ? 'selected' : '' },
-    el('button', { class: 'pick', type: 'button', onclick: () => { S.listId = id; renderLists(); loadTasks().catch(showError); } }, label),
+    el('button', { class: 'pick', type: 'button', onclick: () => { S.listId = id; renderLists(); loadTasks().catch(showError); } },
+      ...(list ? [ dot(list) ] : []), label),
     ...(list?.myRights.mayDelete
       ? [ el('button', { class: 'quiet', type: 'button', title: 'Delete list', onclick: () => destroyList(list).catch(showError) }, '×') ]
       : []),
@@ -393,9 +414,10 @@ function renderTasks () {
     const name = el('span', { class: 'name', title: 'Click to edit' }, task.title ?? '(untitled)');
     name.addEventListener('click', () => editTitle(task, name));
 
-    const listNames = Object.keys(task.taskListIds)
-      .map(id => S.lists.find(l => l.id === id)?.name)
-      .filter(Boolean);
+    const inLists = Object.keys(task.taskListIds)
+      .map(id => S.lists.find(l => l.id === id))
+      .filter(Boolean)
+      .flatMap(list => [ dot(list), list.name ]);
 
     ul.append(el('li', { class: [done ? 'done' : '', isOverdue(task) ? 'overdue' : ''].join(' ') },
       el('input', { type: 'checkbox', checked: done, title: done ? 'Mark not done' : 'Mark done',
@@ -403,7 +425,7 @@ function renderTasks () {
       name,
       el('span', { class: 'due' },
         task.due ? formatDue(task) : '',
-        S.listId ? '' : el('span', { class: 'in' }, task.due ? ' · ' : '', listNames.join(', '))),
+        S.listId ? '' : el('span', { class: 'in' }, task.due ? ' · ' : '', ...inLists)),
       el('button', { class: 'quiet', type: 'button', title: 'Delete task',
                      onclick: () => destroyTask(task).catch(showError) }, '×'),
     ));
