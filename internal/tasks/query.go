@@ -50,9 +50,6 @@ type comparator struct {
 type predicate func(*queryRow) bool
 
 func (s *Service) taskQuery(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	if err := s.checkAccount(args); err != nil {
-		return nil, err
-	}
 	expand, err := argBool(args, "expandRecurrences", false)
 	if err != nil {
 		return nil, err
@@ -498,8 +495,5 @@ func nullLastCompare[T any](a, b *T, compare func(T, T) int, direction func(int)
 }
 
 func (s *Service) taskQueryChanges(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	if err := s.checkAccount(args); err != nil {
-		return nil, err
-	}
 	return nil, &jmap.MethodError{Type: jmap.ErrCannotCalculateChanges}
 }

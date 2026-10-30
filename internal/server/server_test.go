@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rjbs/taskmaster/internal/auth"
 	"github.com/rjbs/taskmaster/internal/jmap"
 	"github.com/rjbs/taskmaster/internal/store"
 	"github.com/rjbs/taskmaster/internal/tasks"
@@ -41,12 +42,22 @@ func newEnv(t *testing.T) *env {
 	if err := svc.EnsureDefaultTaskList(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+	reg := tasks.NewRegistry()
+	reg.Add(svc)
 	proc := jmap.NewProcessor()
-	svc.Register(proc)
+	reg.Register(proc)
 	broker := NewBroker()
-	db.OnCommit(broker.Publish)
+	db.OnCommit(broker.Publisher(account))
 
-	ts := httptest.NewServer(New(Config{AccountID: account, Tasks: svc, Processor: proc, Broker: broker}))
+	dir, err := auth.NewDirectory(
+		map[string]*auth.User{account: {Credentials: []auth.Credential{{Type: auth.CredLoopback}}}},
+		map[string]*auth.Account{account: {Name: account, Owner: account}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := New(Config{Directory: dir, Accounts: reg, Processor: proc, Broker: broker})
+	ts := httptest.NewServer(auth.Loopback(dir, srv))
 	t.Cleanup(ts.Close)
 	return &env{t: t, ts: ts, broker: broker}
 }

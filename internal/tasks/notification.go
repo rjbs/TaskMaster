@@ -10,9 +10,6 @@ import "github.com/rjbs/taskmaster/internal/jmap"
 const notificationState = "0"
 
 func (s *Service) notificationGet(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	if err := s.checkAccount(args); err != nil {
-		return nil, err
-	}
 	ids, _, err := argStringList(args, "ids")
 	if err != nil {
 		return nil, err
@@ -29,9 +26,6 @@ func (s *Service) notificationGet(c *jmap.Context, args map[string]any) (map[str
 }
 
 func (s *Service) notificationChanges(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	if err := s.checkAccount(args); err != nil {
-		return nil, err
-	}
 	since, ok, err := argString(args, "sinceState")
 	if err != nil {
 		return nil, err
@@ -51,9 +45,6 @@ func (s *Service) notificationChanges(c *jmap.Context, args map[string]any) (map
 }
 
 func (s *Service) notificationSet(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	if err := s.checkAccount(args); err != nil {
-		return nil, err
-	}
 	create, _, err := argObject(args, "create")
 	if err != nil {
 		return nil, err
@@ -94,9 +85,6 @@ func (s *Service) notificationSet(c *jmap.Context, args map[string]any) (map[str
 }
 
 func (s *Service) notificationQuery(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	if err := s.checkAccount(args); err != nil {
-		return nil, err
-	}
 	resp := map[string]any{
 		"accountId":           s.cfg.AccountID,
 		"queryState":          notificationState,
@@ -113,9 +101,6 @@ func (s *Service) notificationQuery(c *jmap.Context, args map[string]any) (map[s
 }
 
 func (s *Service) notificationQueryChanges(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	if err := s.checkAccount(args); err != nil {
-		return nil, err
-	}
 	since, ok, err := argString(args, "sinceQueryState")
 	if err != nil {
 		return nil, err

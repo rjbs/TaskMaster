@@ -438,9 +438,6 @@ func extractTaskListIDs(c *jmap.Context, tx *store.Tx, obj map[string]any) ([]st
 }
 
 func (s *Service) taskGet(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	if err := s.checkAccount(args); err != nil {
-		return nil, err
-	}
 	ids, hasIDs, err := argStringList(args, "ids")
 	if err != nil {
 		return nil, err
@@ -543,9 +540,6 @@ func (s *Service) windowOverrides(obj map[string]any, after, before *string) {
 }
 
 func (s *Service) taskChanges(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	if err := s.checkAccount(args); err != nil {
-		return nil, err
-	}
 	tx, err := s.begin(c)
 	if err != nil {
 		return nil, err
@@ -555,9 +549,6 @@ func (s *Service) taskChanges(c *jmap.Context, args map[string]any) (map[string]
 }
 
 func (s *Service) taskSet(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	if err := s.checkAccount(args); err != nil {
-		return nil, err
-	}
 	create, _, err := argObject(args, "create")
 	if err != nil {
 		return nil, err

@@ -1,10 +1,12 @@
 // Package tasks implements the JMAP for Task Lists data types (TaskList,
 // Task, and a deliberately empty TaskNotification) on top of the store.
 //
-// This is a single-user server, so everything the specification says about
-// sharing, per-user properties, rights and notifications collapses: the one
-// user owns every list, has every right, and is never notified of changes
-// made by anyone else.
+// Each account has its own database and its own Service; a Registry routes
+// method calls to the Service for the accountId they name.  Every account
+// has exactly one user, its owner, so everything the specification says
+// about sharing, per-user properties, rights and notifications collapses:
+// the owner has every right and is never notified of changes made by
+// anyone else.
 package tasks
 
 import (
@@ -17,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/rjbs/taskmaster/internal/auth"
 	"github.com/rjbs/taskmaster/internal/jmap"
 	"github.com/rjbs/taskmaster/internal/store"
 )
@@ -31,7 +34,7 @@ const (
 
 // Config holds the deployment-specific settings of the service.
 type Config struct {
-	// AccountID is the one account this server serves.
+	// AccountID is the account this service serves.
 	AccountID string
 
 	// DefaultTimeZone resolves floating date-times (tasks with no
@@ -52,24 +55,71 @@ func New(db *store.DB, cfg Config) *Service {
 	return &Service{db: db, cfg: cfg}
 }
 
-// Register adds every method this service implements to p.
-func (s *Service) Register(p *jmap.Processor) {
-	for name, h := range map[string]jmap.Handler{
-		"TaskList/get":                  s.taskListGet,
-		"TaskList/changes":              s.taskListChanges,
-		"TaskList/set":                  s.taskListSet,
-		"Task/get":                      s.taskGet,
-		"Task/changes":                  s.taskChanges,
-		"Task/set":                      s.taskSet,
-		"Task/query":                    s.taskQuery,
-		"Task/queryChanges":             s.taskQueryChanges,
-		"TaskNotification/get":          s.notificationGet,
-		"TaskNotification/changes":      s.notificationChanges,
-		"TaskNotification/set":          s.notificationSet,
-		"TaskNotification/query":        s.notificationQuery,
-		"TaskNotification/queryChanges": s.notificationQueryChanges,
-	} {
-		p.Register(name, Capability, h)
+// AccountID is the id of the account this service serves.
+func (s *Service) AccountID() string { return s.cfg.AccountID }
+
+// methods maps each JMAP method to the Service method implementing it.
+var methods = map[string]func(*Service) jmap.Handler{
+	"TaskList/get":                  func(s *Service) jmap.Handler { return s.taskListGet },
+	"TaskList/changes":              func(s *Service) jmap.Handler { return s.taskListChanges },
+	"TaskList/set":                  func(s *Service) jmap.Handler { return s.taskListSet },
+	"Task/get":                      func(s *Service) jmap.Handler { return s.taskGet },
+	"Task/changes":                  func(s *Service) jmap.Handler { return s.taskChanges },
+	"Task/set":                      func(s *Service) jmap.Handler { return s.taskSet },
+	"Task/query":                    func(s *Service) jmap.Handler { return s.taskQuery },
+	"Task/queryChanges":             func(s *Service) jmap.Handler { return s.taskQueryChanges },
+	"TaskNotification/get":          func(s *Service) jmap.Handler { return s.notificationGet },
+	"TaskNotification/changes":      func(s *Service) jmap.Handler { return s.notificationChanges },
+	"TaskNotification/set":          func(s *Service) jmap.Handler { return s.notificationSet },
+	"TaskNotification/query":        func(s *Service) jmap.Handler { return s.notificationQuery },
+	"TaskNotification/queryChanges": func(s *Service) jmap.Handler { return s.notificationQueryChanges },
+}
+
+// Registry holds the Service for every account the server has.
+type Registry struct {
+	services map[string]*Service
+}
+
+func NewRegistry() *Registry {
+	return &Registry{services: map[string]*Service{}}
+}
+
+// Add makes svc the service for its account.
+func (r *Registry) Add(svc *Service) {
+	r.services[svc.AccountID()] = svc
+}
+
+// Get returns the service for an account, or nil.
+func (r *Registry) Get(accountID string) *Service {
+	return r.services[accountID]
+}
+
+// Register adds every method to p.  Each call is routed to the Service for
+// its accountId, provided the request's authenticated user owns that
+// account; otherwise the call fails with accountNotFound, which is what RFC
+// 8620 prescribes for an account the user cannot see.
+func (r *Registry) Register(p *jmap.Processor) {
+	for name, pick := range methods {
+		p.Register(name, Capability, r.route(pick))
+	}
+}
+
+func (r *Registry) route(pick func(*Service) jmap.Handler) jmap.Handler {
+	return func(c *jmap.Context, args map[string]any) (map[string]any, error) {
+		v, ok := args["accountId"]
+		if !ok {
+			return nil, jmap.ArgError("accountId is required")
+		}
+		id, ok := v.(string)
+		if !ok {
+			return nil, jmap.ArgError("accountId must be a string")
+		}
+		user, _ := auth.UserFrom(c.Context())
+		svc := r.services[id]
+		if svc == nil || user == nil || !user.HasAccount(id) {
+			return nil, &jmap.MethodError{Type: jmap.ErrAccountNotFound}
+		}
+		return pick(svc)(c, args)
 	}
 }
 
@@ -110,18 +160,6 @@ func (s *Service) EnsureDefaultTaskList(ctx context.Context) error {
 
 func (s *Service) begin(c *jmap.Context) (*store.Tx, error) {
 	return s.db.Begin(c.Context())
-}
-
-func (s *Service) checkAccount(args map[string]any) *jmap.MethodError {
-	v, ok := args["accountId"]
-	if !ok {
-		return jmap.ArgError("accountId is required")
-	}
-	id, ok := v.(string)
-	if !ok || id != s.cfg.AccountID {
-		return &jmap.MethodError{Type: jmap.ErrAccountNotFound}
-	}
-	return nil
 }
 
 func newID(prefix string) string {

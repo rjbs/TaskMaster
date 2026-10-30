@@ -299,9 +299,6 @@ func updateTaskListRow(tx *store.Tx, l *taskList) error {
 }
 
 func (s *Service) taskListGet(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	if err := s.checkAccount(args); err != nil {
-		return nil, err
-	}
 	ids, hasIDs, err := argStringList(args, "ids")
 	if err != nil {
 		return nil, err
@@ -365,9 +362,6 @@ func (s *Service) taskListGet(c *jmap.Context, args map[string]any) (map[string]
 }
 
 func (s *Service) taskListChanges(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	if err := s.checkAccount(args); err != nil {
-		return nil, err
-	}
 	tx, err := s.begin(c)
 	if err != nil {
 		return nil, err
@@ -377,9 +371,6 @@ func (s *Service) taskListChanges(c *jmap.Context, args map[string]any) (map[str
 }
 
 func (s *Service) taskListSet(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	if err := s.checkAccount(args); err != nil {
-		return nil, err
-	}
 	create, _, err := argObject(args, "create")
 	if err != nil {
 		return nil, err

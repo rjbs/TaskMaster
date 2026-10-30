@@ -1,18 +1,23 @@
-// Command taskmaster is a single-user JMAP for Task Lists server backed by
-// SQLite.
+// Command taskmaster is a small JMAP for Task Lists server backed by SQLite,
+// with one database per account.
 package main
 
 import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
 	"syscall"
 	"time"
 
+	"github.com/rjbs/taskmaster/internal/auth"
+	"github.com/rjbs/taskmaster/internal/config"
 	"github.com/rjbs/taskmaster/internal/jmap"
 	"github.com/rjbs/taskmaster/internal/server"
 	"github.com/rjbs/taskmaster/internal/store"
@@ -20,72 +25,111 @@ import (
 )
 
 func main() {
-	listen := flag.String("listen", "127.0.0.1:8080", "address to listen on")
-	dbPath := flag.String("db", "taskmaster.sqlite", "path to the SQLite database")
-	account := flag.String("account", "rjbs", "account id and username to serve")
-	tzName := flag.String("tz", "America/New_York", "time zone for tasks without one")
-	baseURL := flag.String("base-url", "", "public base URL for the Session object (default: derived from each request)")
+	configPath := flag.String("config", "taskmaster.json", "path to the configuration file")
+	verbose := flag.Bool("v", false, "log at debug level (includes Tailscale's chatter)")
 	flag.Parse()
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-
-	loc, err := time.LoadLocation(*tzName)
-	if err != nil {
-		logger.Error("bad -tz", "error", err)
-		os.Exit(1)
+	level := slog.LevelInfo
+	if *verbose {
+		level = slog.LevelDebug
 	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
-	db, err := store.Open(*dbPath)
-	if err != nil {
-		logger.Error("opening database", "error", err)
-		os.Exit(1)
-	}
-	defer db.Close()
-
-	svc := tasks.New(db, tasks.Config{AccountID: *account, DefaultTimeZone: loc})
-	if err := svc.EnsureDefaultTaskList(context.Background()); err != nil {
-		logger.Error("creating default task list", "error", err)
-		os.Exit(1)
-	}
-
-	proc := jmap.NewProcessor()
-	svc.Register(proc)
-
-	broker := server.NewBroker()
-	db.OnCommit(broker.Publish)
-
-	srv := &http.Server{
-		Addr: *listen,
-		Handler: logRequests(logger, server.New(server.Config{
-			AccountID: *account,
-			BaseURL:   *baseURL,
-			Tasks:     svc,
-			Processor: proc,
-			Broker:    broker,
-			Logger:    logger,
-		})),
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		srv.Shutdown(shutdownCtx)
-	}()
-
-	logger.Info("listening", "addr", *listen, "db", *dbPath, "account", *account)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Error("server failed", "error", err)
+	if err := run(logger, *configPath); err != nil {
+		logger.Error("taskmaster failed", "error", err)
 		os.Exit(1)
 	}
 }
 
-func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
+func run(logger *slog.Logger, configPath string) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	if cfg.Listen == "" && cfg.Tailscale == nil {
+		return errors.New("nothing to do: no listen address")
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	reg := tasks.NewRegistry()
+	broker := server.NewBroker()
+	ids := make([]string, 0, len(cfg.Directory.Accounts))
+	for id := range cfg.Directory.Accounts {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		acct := cfg.Directory.Accounts[id]
+		db, err := store.Open(acct.Path)
+		if err != nil {
+			return fmt.Errorf("opening database for account %q: %w", id, err)
+		}
+		defer db.Close()
+		svc := tasks.New(db, tasks.Config{AccountID: id, DefaultTimeZone: cfg.Location})
+		if err := svc.EnsureDefaultTaskList(ctx); err != nil {
+			return fmt.Errorf("creating default task list for account %q: %w", id, err)
+		}
+		db.OnCommit(broker.Publisher(id))
+		reg.Add(svc)
+		logger.Info("account", "id", id, "owner", acct.Owner, "db", acct.Path)
+	}
+
+	proc := jmap.NewProcessor()
+	reg.Register(proc)
+	srv := server.New(server.Config{
+		BaseURL:   cfg.BaseURL,
+		Directory: cfg.Directory,
+		Accounts:  reg,
+		Processor: proc,
+		Broker:    broker,
+		Logger:    logger,
+	})
+
+	var servers []*http.Server
+	errs := make(chan error, 2)
+	serve := func(name string, ln net.Listener, h http.Handler) {
+		hs := &http.Server{Handler: logRequests(logger, name, h)}
+		servers = append(servers, hs)
+		go func() {
+			if err := hs.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errs <- fmt.Errorf("%s listener: %w", name, err)
+			}
+		}()
+	}
+
+	if cfg.Listen != "" {
+		ln, err := net.Listen("tcp", cfg.Listen)
+		if err != nil {
+			return err
+		}
+		if u := cfg.Directory.LoopbackUser(); u != nil {
+			logger.Info("listening", "addr", ln.Addr(), "user", u.ID)
+		} else {
+			logger.Warn("listening, but no user holds the loopback credential, so every request will be refused", "addr", ln.Addr())
+		}
+		serve("plain", ln, auth.Loopback(cfg.Directory, srv))
+	}
+
+	select {
+	case <-ctx.Done():
+	case err := <-errs:
+		return err
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, hs := range servers {
+		hs.Shutdown(shutdownCtx)
+	}
+	return nil
+}
+
+func logRequests(logger *slog.Logger, listener string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		next.ServeHTTP(w, r)
-		logger.Info("request", "method", r.Method, "path", r.URL.Path, "took", time.Since(start).Round(time.Millisecond))
+		logger.Info("request", "via", listener, "method", r.Method, "path", r.URL.Path, "took", time.Since(start).Round(time.Millisecond))
 	})
 }

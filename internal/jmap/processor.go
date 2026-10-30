@@ -45,14 +45,14 @@ type method struct {
 type Processor struct {
 	methods      map[string]method
 	MaxCalls     int
-	SessionState func() string
+	SessionState func(ctx context.Context) string
 }
 
 func NewProcessor() *Processor {
 	return &Processor{
 		methods:      map[string]method{},
 		MaxCalls:     64,
-		SessionState: func() string { return "0" },
+		SessionState: func(context.Context) string { return "0" },
 	}
 }
 
@@ -94,7 +94,7 @@ func (p *Processor) Process(ctx context.Context, req *Request) (*Response, *Requ
 		c.responses = append(c.responses, p.invoke(c, call, using))
 	}
 
-	resp := &Response{MethodResponses: c.responses, SessionState: p.SessionState()}
+	resp := &Response{MethodResponses: c.responses, SessionState: p.SessionState(ctx)}
 	if req.CreatedIds != nil || len(c.CreatedIDs) > 0 {
 		resp.CreatedIds = c.CreatedIDs
 	}

@@ -1,3 +1,5 @@
 /taskmaster
 *.sqlite
 *.sqlite-*
+/taskmaster.json
+/data/

@@ -1,0 +1,19 @@
+{
+  "listen": "127.0.0.1:8080",
+  "timeZone": "America/New_York",
+  "dataDir": "data",
+  "tailscale": { "hostname": "taskmaster" },
+  "users": {
+    "rjbs": {
+      "credentials": [
+        { "type": "loopback" },
+        { "type": "tailscale", "login": "rjbs@github" }
+      ],
+      "primaryAccount": "rjbs"
+    }
+  },
+  "accounts": {
+    "rjbs": { "owner": "rjbs", "name": "Personal" },
+    "work": { "owner": "rjbs", "name": "Work" }
+  }
+}

@@ -1,9 +1,14 @@
 // Package server exposes the JMAP service over HTTP: the Session resource,
 // the API endpoint, an event source for push, and placeholder blob
 // endpoints that the Session object is obliged to advertise.
+//
+// Every request must already carry an authenticated user in its context,
+// put there by one of the auth package's listeners; the Server itself
+// refuses anything else.
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rjbs/taskmaster/internal/auth"
 	"github.com/rjbs/taskmaster/internal/jmap"
 	"github.com/rjbs/taskmaster/internal/tasks"
 )
@@ -22,13 +28,12 @@ import (
 const maxSizeRequest = 10_000_000
 
 type Config struct {
-	AccountID string
-
 	// BaseURL, if set, is used to build the absolute URLs in the Session
 	// object.  Otherwise they are derived from each request.
 	BaseURL string
 
-	Tasks     *tasks.Service
+	Directory *auth.Directory
+	Accounts  *tasks.Registry
 	Processor *jmap.Processor
 	Broker    *Broker
 	Logger    *slog.Logger
@@ -55,6 +60,10 @@ func New(cfg Config) *Server {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if _, ok := auth.UserFrom(r.Context()); !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -69,11 +78,38 @@ func (s *Server) baseURL(r *http.Request) string {
 	return scheme + "://" + r.Host
 }
 
-// session builds the Session object (RFC 8620 §2).
+// user returns the request's authenticated user, which ServeHTTP has
+// already insisted on.
+func user(ctx context.Context) *auth.User {
+	u, _ := auth.UserFrom(ctx)
+	return u
+}
+
+// accounts builds the Session's accounts object for a user.
+func (s *Server) accounts(u *auth.User) map[string]any {
+	out := map[string]any{}
+	for _, id := range u.Accounts {
+		svc := s.cfg.Accounts.Get(id)
+		if svc == nil {
+			continue
+		}
+		out[id] = map[string]any{
+			"name":       s.cfg.Directory.Accounts[id].Name,
+			"isPersonal": true,
+			"isReadOnly": false,
+			"accountCapabilities": map[string]any{
+				tasks.Capability: svc.AccountCapabilities(),
+			},
+		}
+	}
+	return out
+}
+
+// session builds the Session object (RFC 8620 §2) for the request's user.
 func (s *Server) session(r *http.Request) map[string]any {
 	base := s.baseURL(r)
-	acct := s.cfg.AccountID
-	sess := map[string]any{
+	u := user(r.Context())
+	return map[string]any{
 		"capabilities": map[string]any{
 			jmap.CoreCapability: map[string]any{
 				"maxSizeUpload":         0,
@@ -87,35 +123,26 @@ func (s *Server) session(r *http.Request) map[string]any {
 			},
 			tasks.Capability: map[string]any{},
 		},
-		"accounts": map[string]any{
-			acct: map[string]any{
-				"name":       acct,
-				"isPersonal": true,
-				"isReadOnly": false,
-				"accountCapabilities": map[string]any{
-					tasks.Capability: s.cfg.Tasks.AccountCapabilities(),
-				},
-			},
-		},
+		"accounts": s.accounts(u),
 		"primaryAccounts": map[string]any{
-			tasks.Capability: acct,
+			tasks.Capability: u.PrimaryAccount,
 		},
-		"username":       acct,
+		"username":       u.ID,
 		"apiUrl":         base + "/jmap",
 		"downloadUrl":    base + "/jmap/download/{accountId}/{blobId}/{name}?accept={type}",
 		"uploadUrl":      base + "/jmap/upload/{accountId}/",
 		"eventSourceUrl": base + "/jmap/eventsource?types={types}&closeafter={closeafter}&ping={ping}",
+		"state":          s.sessionState(r.Context()),
 	}
-	sess["state"] = s.sessionState()
-	return sess
 }
 
 // sessionState only has to change when the session changes.  Apart from
-// the URLs, which vary per request but not per session, the only variable
-// content is the account capabilities, so a digest of those is an honest
-// state string.
-func (s *Server) sessionState() string {
-	digest, _ := json.Marshal([]any{s.cfg.AccountID, s.cfg.Tasks.AccountCapabilities()})
+// the URLs, which vary per request but not per session, the variable
+// content is the user's accounts and their capabilities, so a digest of
+// those is an honest state string.
+func (s *Server) sessionState(ctx context.Context) string {
+	u := user(ctx)
+	digest, _ := json.Marshal([]any{u.ID, u.PrimaryAccount, s.accounts(u)})
 	sum := sha256.Sum256(digest)
 	return hex.EncodeToString(sum[:8])
 }
@@ -167,6 +194,24 @@ func (s *Server) handleNoBlobs(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "this server does not store blobs", http.StatusNotFound)
 }
 
+// currentStates reads the state of every type in every one of the user's
+// accounts, in the shape of a StateChange's "changed" member.
+func (s *Server) currentStates(ctx context.Context, u *auth.User) (Changes, error) {
+	out := Changes{}
+	for _, id := range u.Accounts {
+		svc := s.cfg.Accounts.Get(id)
+		if svc == nil {
+			continue
+		}
+		states, err := svc.States(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out[id] = states
+	}
+	return out, nil
+}
+
 // handleEventSource implements the push event source (RFC 8620 §7.3).
 func (s *Server) handleEventSource(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
@@ -174,6 +219,7 @@ func (s *Server) handleEventSource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+	u := user(r.Context())
 	q := r.URL.Query()
 	wanted := map[string]bool{}
 	for _, t := range strings.Split(q.Get("types"), ",") {
@@ -191,7 +237,7 @@ func (s *Server) handleEventSource(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	sub := s.cfg.Broker.subscribe()
+	sub := s.cfg.Broker.subscribe(u.Accounts)
 	defer s.cfg.Broker.unsubscribe(sub)
 
 	eventID := 0
@@ -199,12 +245,17 @@ func (s *Server) handleEventSource(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "event: ping\ndata: {\"interval\": %d}\n\n", pingSeconds)
 		flusher.Flush()
 	}
-	sendState := func(changed map[string]string) bool {
-		if !all {
-			for typ := range changed {
-				if !wanted[typ] {
-					delete(changed, typ)
+	sendState := func(changed Changes) bool {
+		for acct, types := range changed {
+			if !all {
+				for typ := range types {
+					if !wanted[typ] {
+						delete(types, typ)
+					}
 				}
+			}
+			if len(types) == 0 {
+				delete(changed, acct)
 			}
 		}
 		if len(changed) == 0 {
@@ -213,7 +264,7 @@ func (s *Server) handleEventSource(w http.ResponseWriter, r *http.Request) {
 		eventID++
 		data, _ := json.Marshal(map[string]any{
 			"@type":   "StateChange",
-			"changed": map[string]any{s.cfg.AccountID: changed},
+			"changed": changed,
 		})
 		fmt.Fprintf(w, "event: state\nid: %d\ndata: %s\n\n", eventID, data)
 		flusher.Flush()
@@ -233,7 +284,7 @@ func (s *Server) handleEventSource(w http.ResponseWriter, r *http.Request) {
 			sendPing()
 		}
 	} else {
-		states, err := s.cfg.Tasks.States(r.Context())
+		states, err := s.currentStates(r.Context(), u)
 		if err != nil {
 			s.cfg.Logger.Error("reading states for event source", "error", err)
 			return
