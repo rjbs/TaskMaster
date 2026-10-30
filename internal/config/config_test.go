@@ -1,0 +1,93 @@
+package config
+
+import (
+	"strings"
+	"testing"
+)
+
+func checkParse(t *testing.T, name, text, wantErr string) *Config {
+	t.Helper()
+	cfg, err := Parse([]byte(text), "/base")
+	switch {
+	case wantErr == "" && err != nil:
+		t.Errorf("%s: unexpected error: %v", name, err)
+	case wantErr != "" && err == nil:
+		t.Errorf("%s: expected error containing %q, got none", name, wantErr)
+	case wantErr != "" && !strings.Contains(err.Error(), wantErr):
+		t.Errorf("%s: error %q does not contain %q", name, err, wantErr)
+	}
+	return cfg
+}
+
+func TestParse(t *testing.T) {
+	cfg := checkParse(t, "minimal", `{
+		"users":    { "rjbs": { "credentials": [ { "type": "loopback" } ] } },
+		"accounts": { "rjbs": { "owner": "rjbs" } }
+	}`, "")
+	if cfg != nil {
+		if got := cfg.Directory.Accounts["rjbs"].Path; got != "/base/rjbs.sqlite" {
+			t.Errorf("default path: got %q", got)
+		}
+		if got := cfg.Directory.Users["rjbs"].PrimaryAccount; got != "rjbs" {
+			t.Errorf("implied primary: got %q", got)
+		}
+		if cfg.Directory.LoopbackUser() == nil {
+			t.Error("loopback user not indexed")
+		}
+	}
+
+	cfg = checkParse(t, "two accounts", `{
+		"dataDir": "data",
+		"users": { "rjbs": {
+			"credentials": [ { "type": "tailscale", "login": "rjbs@github" } ],
+			"primaryAccount": "work"
+		} },
+		"accounts": {
+			"rjbs": { "owner": "rjbs", "name": "Personal" },
+			"work": { "owner": "rjbs", "path": "/elsewhere/work.sqlite" }
+		}
+	}`, "")
+	if cfg != nil {
+		if got := cfg.Directory.Accounts["rjbs"].Path; got != "/base/data/rjbs.sqlite" {
+			t.Errorf("dataDir path: got %q", got)
+		}
+		if got := cfg.Directory.Accounts["work"].Path; got != "/elsewhere/work.sqlite" {
+			t.Errorf("explicit path: got %q", got)
+		}
+		if got := cfg.Directory.Users["rjbs"].Accounts; len(got) != 2 {
+			t.Errorf("accounts: got %v", got)
+		}
+		if cfg.Directory.TailscaleUser("rjbs@github") == nil {
+			t.Error("tailscale login not indexed")
+		}
+		if cfg.Directory.LoopbackUser() != nil {
+			t.Error("unexpected loopback user")
+		}
+	}
+
+	checkParse(t, "unknown field", `{ "lisen": "x", "users": {}, "accounts": {} }`, "unknown field")
+	checkParse(t, "no accounts", `{ "users": { "rjbs": {} }, "accounts": {} }`, "at least one account")
+	checkParse(t, "unknown owner", `{ "users": {}, "accounts": { "a": { "owner": "nobody" } } }`, "unknown user")
+	checkParse(t, "no primary", `{
+		"users": { "rjbs": {} },
+		"accounts": { "a": { "owner": "rjbs" }, "b": { "owner": "rjbs" } }
+	}`, "primaryAccount")
+	checkParse(t, "bad primary", `{
+		"users": { "rjbs": { "primaryAccount": "zzz" } },
+		"accounts": { "a": { "owner": "rjbs" } }
+	}`, "does not own")
+	checkParse(t, "two loopbacks", `{
+		"users": {
+			"a": { "credentials": [ { "type": "loopback" } ] },
+			"b": { "credentials": [ { "type": "loopback" } ] }
+		},
+		"accounts": { "a": { "owner": "a" }, "b": { "owner": "b" } }
+	}`, "both claim the loopback")
+	checkParse(t, "bad credential", `{
+		"users": { "a": { "credentials": [ { "type": "passkey" } ] } },
+		"accounts": { "a": { "owner": "a" } }
+	}`, "unknown type")
+	checkParse(t, "bad id", `{ "users": { "a": {} }, "accounts": { "../x": { "owner": "a" } } }`, "not allowed")
+	checkParse(t, "bad zone", `{ "timeZone": "Mars/Olympus", "users": { "a": {} }, "accounts": { "a": { "owner": "a" } } }`, "timeZone")
+	checkParse(t, "tailscale needs hostname", `{ "tailscale": {}, "users": { "a": {} }, "accounts": { "a": { "owner": "a" } } }`, "hostname")
+}
