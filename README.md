@@ -1,33 +1,69 @@
 # TaskMaster
 
-A small, single-user JMAP for Task Lists server, backed by SQLite.  It
-implements the data model in `draft-signes-jmap-tasklists`, trimmed to what
-one person with one account needs.
+A small JMAP for Task Lists server, backed by SQLite.  It implements the
+data model in `draft-signes-jmap-tasklists`, trimmed to what one person
+needs: a few accounts, each with its own database, and no sharing.
 
 ## Running
 
     go build ./cmd/taskmaster
-    ./taskmaster -listen 127.0.0.1:8080 -db taskmaster.sqlite
-
-Flags:
-
-| flag        | default            | meaning                                           |
-|-------------|--------------------|---------------------------------------------------|
-| `-listen`   | `127.0.0.1:8080`   | address to listen on                              |
-| `-db`       | `taskmaster.sqlite`| SQLite database path, created on first run        |
-| `-account`  | `rjbs`             | the account id and username served                |
-| `-tz`       | `America/New_York` | server-side fallback zone for tasks with no `timeZone` (see below) |
-| `-base-url` | derived per request| public base URL for the Session object's URLs     |
+    cp taskmaster.example.json taskmaster.json   # and edit
+    ./taskmaster -config taskmaster.json
 
 The Session object is at `/.well-known/jmap`, the API at `/jmap`, and the
-push event source at `/jmap/eventsource`.  On first start, a default
-TaskList named "Tasks" is created.
+push event source at `/jmap/eventsource`.  On first start, each account
+gets a default TaskList named "Tasks".
 
-There is no authentication yet.  Bind to localhost or put it behind
-something that provides it.
+## Users, accounts, and credentials
+
+The configuration file (JSON; see `taskmaster.example.json` and the
+`config` package documentation) describes three kinds of thing:
+
+* a **user** is an actor who can authenticate;
+* an **account** is a JMAP account, a body of data in its own SQLite file,
+  owned by exactly one user, who has complete access to it.  A user may
+  own several accounts, in which case it must name a `primaryAccount`;
+* a **credential** is a way a user proves who they are.  There are two
+  types.  `loopback` means "requests arriving on the plain `listen`
+  address", which at most one user may hold.  `tailscale` names a
+  Tailscale login (like `rjbs`).
+
+The Session object a user sees lists only the accounts they own, and a
+method call naming any other account fails with `accountNotFound`.
+
+| setting     | default            | meaning                                           |
+|-------------|--------------------|---------------------------------------------------|
+| `listen`    | `127.0.0.1:8080`   | plain HTTP listener; empty disables it            |
+| `baseUrl`   | derived per request| public base URL for the Session object URLs       |
+| `timeZone`  | `America/New_York` | server-side fallback zone for tasks with no `timeZone` (see below) |
+| `dataDir`   | the config file dir| where `<account>.sqlite` files live unless an account gives a `path` |
+| `tailscale` | absent             | `{ "hostname": ..., "dir": ... }`; see below      |
+
+Relative paths are resolved against the directory holding the config file.
+
+### Tailscale
+
+With a `tailscale` section, the server joins your tailnet as its own node
+(via tsnet, in userspace, so no `tailscaled` is needed on the host) and
+serves HTTPS on `https://<hostname>.<tailnet>.ts.net/`, with a certificate
+Tailscale obtains for it.  That requires HTTPS to be enabled in the
+tailnet admin console.  Requests are authenticated by the connecting
+node's login name; tagged nodes and logins no user holds are refused, and
+the refusal is logged with the login so you can add it.
+
+The first start must authorize the node: set `TS_AUTHKEY` to an auth key,
+or watch the log for a login URL to visit.  Node state is kept in
+`tailscale.dir` (default `<dataDir>/tailscale`) so later starts need
+nothing.
+
+### Upgrading from the single-database version
+
+Earlier builds took `-db taskmaster.sqlite -account rjbs`.  Make the
+account's `path` point at that file (or move it to `<dataDir>/rjbs.sqlite`)
+and keep the account id the same, since clients cache account ids.
 
 A one-page demo client, TaskBlaster, lives in [`demo-client/`](demo-client/)
-along with a small proxy that serves it in front of the server.
+along with a small proxy that serves it in front of the plain listener.
 
 ## What is implemented
 
@@ -54,15 +90,18 @@ along with a small proxy that serves it in front of the server.
 * Alert triggering.  Alerts are stored but never fire.
 * `Task/parse`, `Task/copy`, and `queryChanges` (which returns
   `cannotCalculateChanges`).
-* Sharing, Principals, and per-user properties.
+* Sharing, Principals, and per-user properties.  Each account has exactly
+  one user with every right.
+* Any authentication for arbitrary internet clients (passkeys, OAuth).
+  The credential types are what one person on a tailnet needs.
 
 ## Notes
 
 * Task/query resolves tasks that have no `timeZone` in the zone given by
   the request's `timeZone` argument (default `Etc/UTC`), for both the
   `before`/`after` filters and sorting on `due` or `start`, as the draft
-  specifies.  Clients should pass the user's current zone.  The `-tz`
-  flag is used only where no client is asking, currently just the
+  specifies.  Clients should pass the user's current zone.  The
+  `timeZone` setting is used only where no client is asking, currently just the
   `recurrenceOverridesBefore`/`After` window in Task/get.
 * Every Task sharing a `uid` must agree on `privacy`.  A Task/set that
   would leave them disagreeing has the offending creates and updates
