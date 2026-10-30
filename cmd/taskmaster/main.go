@@ -21,6 +21,7 @@ import (
 	"github.com/rjbs/taskmaster/internal/jmap"
 	"github.com/rjbs/taskmaster/internal/server"
 	"github.com/rjbs/taskmaster/internal/store"
+	"github.com/rjbs/taskmaster/internal/tailnet"
 	"github.com/rjbs/taskmaster/internal/tasks"
 )
 
@@ -47,7 +48,7 @@ func run(logger *slog.Logger, configPath string) error {
 		return err
 	}
 	if cfg.Listen == "" && cfg.Tailscale == nil {
-		return errors.New("nothing to do: no listen address")
+		return errors.New("nothing to do: no listen address and no tailscale section")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -110,6 +111,23 @@ func run(logger *slog.Logger, configPath string) error {
 			logger.Warn("listening, but no user holds the loopback credential, so every request will be refused", "addr", ln.Addr())
 		}
 		serve("plain", ln, auth.Loopback(cfg.Directory, srv))
+	}
+
+	if ts := cfg.Tailscale; ts != nil {
+		node, err := tailnet.Start(ctx, ts.Hostname, ts.Dir, logger)
+		if err != nil {
+			return fmt.Errorf("joining tailnet: %w", err)
+		}
+		defer node.Close()
+		ln, err := node.ListenTLS()
+		if err != nil {
+			return fmt.Errorf("tailnet listener: %w", err)
+		}
+		reject := func(r *http.Request, why string) {
+			logger.Warn("refused tailscale request", "from", r.RemoteAddr, "why", why)
+		}
+		logger.Info("listening on tailnet", "url", "https://"+node.DNSName+"/")
+		serve("tailnet", ln, auth.Tailscale(cfg.Directory, node.WhoIs, reject, srv))
 	}
 
 	select {
