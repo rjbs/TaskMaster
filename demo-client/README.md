@@ -8,10 +8,14 @@ step, no framework, and only a nod to Mondrian.
 
 ## Running
 
-TaskMaster serves JMAP and nothing else, so the page can't be loaded from it
-directly, and it doesn't send CORS headers, so the page can't be loaded from
-anywhere else either.  The `taskblaster` script fills the gap: it serves
-`index.html` and forwards `/jmap` and `/.well-known/jmap` to TaskMaster.
+TaskMaster embeds this page and serves it at `/` on each of its listeners,
+so with the server running, open <http://127.0.0.1:8080/> (or the
+tailnet URL from the log).  Set `"demoClient": false` in the server's
+configuration to turn that off.
+
+The page is compiled into the server, so editing it means rebuilding.  To
+hack on it without that, the `taskblaster` script serves `index.html` from
+disk and forwards `/jmap` and `/.well-known/jmap` to a running TaskMaster:
 
     ./taskblaster -listen 127.0.0.1:8081 -backend 127.0.0.1:8080
 

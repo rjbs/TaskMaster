@@ -38,6 +38,7 @@ method call naming any other account fails with `accountNotFound`.
 | `timeZone`  | `America/New_York` | server-side fallback zone for tasks with no `timeZone` (see below) |
 | `dataDir`   | the config file dir| where `<account>.sqlite` files live unless an account gives a `path` |
 | `tailscale` | absent             | `{ "hostname": ..., "dir": ..., "https": ... }`; see below |
+| `demoClient`| `true`             | serve the TaskBlaster page at `/` on every listener  |
 
 Relative paths are resolved against the directory holding the config file.
 
@@ -68,8 +69,11 @@ Earlier builds took `-db taskmaster.sqlite -account rjbs`.  Make the
 account's `path` point at that file (or move it to `<dataDir>/rjbs.sqlite`)
 and keep the account id the same, since clients cache account ids.
 
-A one-page demo client, TaskBlaster, lives in [`demo-client/`](demo-client/)
-along with a small proxy that serves it in front of the plain listener.
+A one-page demo client, TaskBlaster, lives in [`demo-client/`](demo-client/).
+The server embeds it and serves it at `/`, so once TaskMaster is up the
+client is at <http://127.0.0.1:8080/> or `https://<hostname>.<tailnet>.ts.net/`,
+behind the same authentication as the JMAP endpoints.  Set
+`"demoClient": false` to serve JMAP alone.
 
 ## What is implemented
 
