@@ -8,6 +8,7 @@
 //	  "timeZone": "America/New_York",
 //	  "dataDir": "data",
 //	  "tailscale": { "hostname": "taskmaster", "dir": "tailscale", "https": true },
+//	  "demoClient": true,
 //	  "users": {
 //	    "rjbs": {
 //	      "credentials": [
@@ -57,6 +58,10 @@ type File struct {
 	// Tailscale, if present, makes the server join the tailnet as its own
 	// node and serve HTTPS there.
 	Tailscale *Tailscale `json:"tailscale"`
+
+	// DemoClient, which defaults to true, serves the TaskBlaster page at
+	// the root of every listener.
+	DemoClient *bool `json:"demoClient"`
 
 	Users    map[string]*User    `json:"users"`
 	Accounts map[string]*Account `json:"accounts"`
@@ -155,6 +160,11 @@ func Parse(raw []byte, baseDir string) (*Config, error) {
 			t := true
 			cfg.Tailscale.HTTPS = &t
 		}
+	}
+
+	if cfg.DemoClient == nil {
+		t := true
+		cfg.DemoClient = &t
 	}
 
 	users := map[string]*auth.User{}

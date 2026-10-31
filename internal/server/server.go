@@ -36,7 +36,10 @@ type Config struct {
 	Accounts  *tasks.Registry
 	Processor *jmap.Processor
 	Broker    *Broker
-	Logger    *slog.Logger
+
+	// Page, if set, is served at the root as the server's own web client.
+	Page   http.Handler
+	Logger *slog.Logger
 }
 
 type Server struct {
@@ -56,6 +59,10 @@ func New(cfg Config) *Server {
 	s.mux.HandleFunc("GET /jmap/eventsource", s.handleEventSource)
 	s.mux.HandleFunc("GET /jmap/download/{accountId}/{blobId}/{name}", s.handleNoBlobs)
 	s.mux.HandleFunc("POST /jmap/upload/{accountId}/", s.handleNoBlobs)
+	if cfg.Page != nil {
+		s.mux.Handle("GET /{$}", cfg.Page)
+		s.mux.Handle("GET /index.html", cfg.Page)
+	}
 	return s
 }
 

@@ -34,6 +34,18 @@ func TestParse(t *testing.T) {
 		if cfg.Directory.LoopbackUser() == nil {
 			t.Error("loopback user not indexed")
 		}
+		if !*cfg.DemoClient {
+			t.Error("demo client should default to on")
+		}
+	}
+
+	cfg = checkParse(t, "no demo client", `{
+		"demoClient": false,
+		"users":    { "rjbs": { "credentials": [ { "type": "loopback" } ] } },
+		"accounts": { "rjbs": { "owner": "rjbs" } }
+	}`, "")
+	if cfg != nil && *cfg.DemoClient {
+		t.Error("demoClient: false was ignored")
 	}
 
 	cfg = checkParse(t, "two accounts", `{

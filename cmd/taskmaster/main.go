@@ -24,6 +24,8 @@ import (
 	"github.com/rjbs/taskmaster/internal/store"
 	"github.com/rjbs/taskmaster/internal/tailnet"
 	"github.com/rjbs/taskmaster/internal/tasks"
+
+	taskblaster "github.com/rjbs/taskmaster/demo-client"
 )
 
 func main() {
@@ -86,12 +88,17 @@ func run(logger *slog.Logger, configPath string) error {
 
 	proc := jmap.NewProcessor()
 	reg.Register(proc)
+	var page http.Handler
+	if *cfg.DemoClient {
+		page = taskblaster.Handler()
+	}
 	srv := server.New(server.Config{
 		BaseURL:   cfg.BaseURL,
 		Directory: cfg.Directory,
 		Accounts:  reg,
 		Processor: proc,
 		Broker:    broker,
+		Page:      page,
 		Logger:    logger,
 	})
 

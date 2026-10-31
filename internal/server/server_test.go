@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -16,6 +17,8 @@ import (
 	"github.com/rjbs/taskmaster/internal/jmap"
 	"github.com/rjbs/taskmaster/internal/store"
 	"github.com/rjbs/taskmaster/internal/tasks"
+
+	taskblaster "github.com/rjbs/taskmaster/demo-client"
 )
 
 const account = "rjbs"
@@ -30,6 +33,12 @@ type env struct {
 }
 
 func newEnv(t *testing.T) *env {
+	t.Helper()
+	return newEnvWith(t, nil)
+}
+
+// newEnvWith is newEnv with a page to serve at the root, or none.
+func newEnvWith(t *testing.T, page http.Handler) *env {
 	t.Helper()
 	db, err := store.Open(":memory:")
 	if err != nil {
@@ -56,7 +65,7 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := New(Config{Directory: dir, Accounts: reg, Processor: proc, Broker: broker})
+	srv := New(Config{Directory: dir, Accounts: reg, Processor: proc, Broker: broker, Page: page})
 	ts := httptest.NewServer(auth.Loopback(dir, srv))
 	t.Cleanup(ts.Close)
 	return &env{t: t, ts: ts, broker: broker}
@@ -975,4 +984,27 @@ func TestEventSourceInitialState(t *testing.T) {
 	if name, data := readEvent(t, resp2.Body); name != "ping" || data["interval"] != 5.0 {
 		t.Errorf("closeafter=state first event: %s %v", name, data)
 	}
+}
+
+func TestDemoPage(t *testing.T) {
+	checkRoot := func(name string, page http.Handler, wantStatus int) {
+		t.Helper()
+		e := newEnvWith(t, page)
+		for _, path := range []string{"/", "/index.html"} {
+			resp, err := http.Get(e.ts.URL + path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != wantStatus {
+				t.Errorf("%s: GET %s: status %d, want %d", name, path, resp.StatusCode, wantStatus)
+			}
+			if wantStatus == 200 && !bytes.Contains(body, []byte("TaskBlaster")) {
+				t.Errorf("%s: GET %s: body does not look like the page", name, path)
+			}
+		}
+	}
+	checkRoot("with page", taskblaster.Handler(), 200)
+	checkRoot("without page", nil, 404)
 }
