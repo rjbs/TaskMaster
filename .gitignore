@@ -3,3 +3,4 @@
 *.sqlite-*
 /taskmaster.json
 /data/
+/taskmaster-linux
