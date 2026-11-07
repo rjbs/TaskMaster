@@ -78,7 +78,9 @@ behind the same authentication as the JMAP endpoints.  Set
 ## What is implemented
 
 * `TaskList/get`, `/changes`, `/set` (including `onDestroyRemoveTasks` and
-  `onSuccessSetIsDefault`)
+  `onSuccessSetIsDefault`).  Vendor-prefixed properties in the RFC 8984
+  form `example.com:name` are stored as given and returned; other unknown
+  properties are rejected.
 * `Task/get`, `/changes`, `/set`, `/query` with every filter condition and
   sort property in the spec
 * `TaskNotification/*`, always empty: there are no other users to be

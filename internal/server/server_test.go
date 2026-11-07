@@ -346,6 +346,9 @@ func TestTaskListValidation(t *testing.T) {
 	checkListInvalid(t, e, obj{"name": "x", "id": "L-1"}, "id")
 	checkListInvalid(t, e, obj{"name": "x", "shareWith": obj{"p": obj{}}}, "shareWith")
 	checkListInvalid(t, e, obj{"name": "x", "bogus": 1}, "bogus")
+	checkListInvalid(t, e, obj{"name": "x", "nodomain:project": 1}, "nodomain:project")
+	checkListInvalid(t, e, obj{"name": "x", "example.com:": 1}, "example.com:")
+	checkListInvalid(t, e, obj{"name": "x", "-bad.com:p": 1}, "-bad.com:p")
 	checkListInvalid(t, e, obj{"name": "x", "defaultAlertsWithTime": obj{
 		"a1": obj{"@type": "Alert", "trigger": obj{"@type": "AbsoluteTrigger", "when": "2026-01-01T00:00:00Z"}},
 	}}, "defaultAlertsWithTime")
@@ -827,6 +830,61 @@ func TestVendorProperties(t *testing.T) {
 	e.call("Task/set", obj{"update": obj{bare: obj{"keywords": obj{"nerfjournal:category:Work": true}}}})
 
 	checkTaskInvalid(t, e, obj{"progressUpdated": "2026-09-13"}, "progressUpdated")
+}
+
+// TestTaskListVendorProperties covers the vendor-prefixed TaskList
+// properties Loose Threads uses to keep a project's identity on its list.
+func TestTaskListVendorProperties(t *testing.T) {
+	e := newEnv(t)
+	const project = "lt.semiotic.systems:project"
+	const meta = "lt.semiotic.systems:meta"
+
+	id := e.createList("Loose Threads", obj{project: "github.com/rjbs/Loose-Threads", meta: obj{"n": 1.0}})
+	other := e.createList("Other", nil)
+	l := e.getList(id)
+	if l[project] != "github.com/rjbs/Loose-Threads" || !reflect.DeepEqual(l[meta], obj{"n": 1.0}) {
+		t.Errorf("vendor properties not stored: %v", l)
+	}
+	if _, has := e.getList(other)[project]; has {
+		t.Error("unset vendor property should be absent")
+	}
+
+	got := e.call("TaskList/get", obj{"ids": []string{id, other}, "properties": []string{project}})["list"].([]any)
+	if !reflect.DeepEqual(got[0], obj{"id": id, project: "github.com/rjbs/Loose-Threads"}) ||
+		!reflect.DeepEqual(got[1], obj{"id": other}) {
+		t.Errorf("properties filter: %v", got)
+	}
+
+	state := e.call("TaskList/get", obj{"ids": []string{}})["state"].(string)
+	e.call("TaskList/set", obj{"update": obj{id: obj{project: "github.com/rjbs/LooseThreads", meta + "/n": 2.0}}})
+	checkChanges(t, e, "TaskList", state, nil, []string{id}, nil)
+	l = e.getList(id)
+	if l[project] != "github.com/rjbs/LooseThreads" || !reflect.DeepEqual(l[meta], obj{"n": 2.0}) {
+		t.Errorf("vendor properties not updated: %v", l)
+	}
+
+	state = e.call("TaskList/get", obj{"ids": []string{}})["state"].(string)
+	e.call("TaskList/set", obj{"update": obj{id: obj{project: nil, meta: nil}}})
+	checkChanges(t, e, "TaskList", state, nil, []string{id}, nil)
+	l = e.getList(id)
+	for _, p := range []string{project, meta} {
+		if _, has := l[p]; has {
+			t.Errorf("%s should have been removed: %v", p, l)
+		}
+	}
+
+	e.call("TaskList/set", obj{"update": obj{other: obj{project: "github.com/rjbs/Other"}}})
+	if e.getList(other)[project] != "github.com/rjbs/Other" {
+		t.Error("vendor property not added by update")
+	}
+
+	resp := e.call("TaskList/set", obj{"update": obj{other: obj{"bogus": 1}}})
+	if typ, props := setErrorProps(t, resp, "notUpdated", other); typ != "invalidProperties" || !slices.Equal(props, []string{"bogus"}) {
+		t.Errorf("unprefixed unknown property on update: %v", resp)
+	}
+	if typ := e.callError("TaskList/get", obj{"properties": []string{"bogus"}}); typ != "invalidArguments" {
+		t.Errorf("unknown property in TaskList/get: %s", typ)
+	}
 }
 
 func TestUseDefaultAlertsAlwaysReturned(t *testing.T) {

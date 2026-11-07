@@ -87,4 +87,9 @@ UPDATE tasks SET
 ALTER TABLE tasks DROP COLUMN start_utc;
 ALTER TABLE tasks DROP COLUMN due_utc;
 `,
+	// Vendor-prefixed TaskList properties, stored as one JSON object, or
+	// NULL when there are none.  -- claude, 2026-11-06
+	`
+ALTER TABLE tasklists ADD COLUMN vendor_props TEXT;
+`,
 }

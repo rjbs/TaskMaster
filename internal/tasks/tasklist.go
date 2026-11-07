@@ -28,6 +28,7 @@ type taskList struct {
 	AlertsWithTime    *string // JSON text, or nil for null
 	AlertsWithoutTime *string
 	TimeZone          *string
+	VendorProps       map[string]any // vendor-prefixed properties, by name
 }
 
 // rights is the TaskListRights object for the one user, who may do
@@ -48,6 +49,32 @@ var taskListProps = map[string]bool{
 	"isDefault": true, "defaultAlertsWithTime": true,
 	"defaultAlertsWithoutTime": true, "timeZone": true, "shareWith": true,
 	"myRights": true,
+}
+
+// isVendorProp reports whether name has the RFC 8984 vendor-extension
+// form "domain:name", which this server stores without interpreting.
+// The domain must be dotted, so that a typo of a real property name is
+// still rejected rather than silently kept.  -- claude, 2026-11-06
+func isVendorProp(name string) bool {
+	domain, rest, ok := strings.Cut(name, ":")
+	if !ok || rest == "" || len(domain) > 253 {
+		return false
+	}
+	labels := strings.Split(domain, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // taskListDefaults gives the value each optional property takes when
@@ -86,7 +113,7 @@ func jsonOrNil(p *string) any {
 }
 
 func (l *taskList) toJMAP() map[string]any {
-	return map[string]any{
+	m := map[string]any{
 		"id":                       l.ID,
 		"name":                     l.Name,
 		"description":              strOrNil(l.Description),
@@ -101,6 +128,10 @@ func (l *taskList) toJMAP() map[string]any {
 		"shareWith":                nil,
 		"myRights":                 rights(),
 	}
+	for k, v := range l.VendorProps {
+		m[k] = v
+	}
+	return m
 }
 
 // taskListFromMap validates a complete TaskList representation (all
@@ -113,8 +144,18 @@ func taskListFromMap(m map[string]any) (*taskList, *jmap.SetError) {
 	}
 	l := &taskList{}
 
-	for k := range m {
-		if !taskListProps[k] {
+	for k, v := range m {
+		switch {
+		case taskListProps[k]:
+		case isVendorProp(k):
+			if v == nil {
+				continue
+			}
+			if l.VendorProps == nil {
+				l.VendorProps = map[string]any{}
+			}
+			l.VendorProps[k] = v
+		default:
 			fail(k, "unknown property")
 		}
 	}
@@ -225,15 +266,23 @@ func validateDefaultAlerts(v any) (string, string) {
 }
 
 const taskListColumns = `id, name, description, color, sort_order, is_subscribed,
-	is_visible, is_default, default_alerts_with_time, default_alerts_without_time, time_zone`
+	is_visible, is_default, default_alerts_with_time, default_alerts_without_time, time_zone,
+	vendor_props`
 
 func scanTaskList(sc interface{ Scan(...any) error }) (*taskList, error) {
 	l := &taskList{}
-	var desc, color, withTime, withoutTime, tz sql.NullString
+	var desc, color, withTime, withoutTime, tz, vendor sql.NullString
 	err := sc.Scan(&l.ID, &l.Name, &desc, &color, &l.SortOrder, &l.IsSubscribed,
-		&l.IsVisible, &l.IsDefault, &withTime, &withoutTime, &tz)
+		&l.IsVisible, &l.IsDefault, &withTime, &withoutTime, &tz, &vendor)
 	if err != nil {
 		return nil, err
+	}
+	if vendor.Valid {
+		v, err := jmap.DecodeValue([]byte(vendor.String))
+		if err != nil {
+			return nil, err
+		}
+		l.VendorProps, _ = v.(map[string]any)
 	}
 	nullable := func(ns sql.NullString) *string {
 		if ns.Valid {
@@ -273,28 +322,50 @@ func loadAllTaskLists(tx *store.Tx) ([]*taskList, error) {
 	return lists, rows.Err()
 }
 
+// vendorPropsText encodes the list's vendor properties for storage, or
+// gives nil if there are none.
+func (l *taskList) vendorPropsText() (*string, error) {
+	if len(l.VendorProps) == 0 {
+		return nil, nil
+	}
+	text, err := encodeJSON(l.VendorProps)
+	if err != nil {
+		return nil, err
+	}
+	return &text, nil
+}
+
 func insertTaskList(tx *store.Tx, l *taskList) error {
+	vendor, err := l.vendorPropsText()
+	if err != nil {
+		return err
+	}
 	modseq, err := tx.NextModSeq(typeTaskList)
 	if err != nil {
 		return err
 	}
 	_, err = tx.Exec(`INSERT INTO tasklists (`+taskListColumns+`, created_modseq, updated_modseq)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		l.ID, l.Name, l.Description, l.Color, l.SortOrder, l.IsSubscribed, l.IsVisible,
-		l.IsDefault, l.AlertsWithTime, l.AlertsWithoutTime, l.TimeZone, modseq, modseq)
+		l.IsDefault, l.AlertsWithTime, l.AlertsWithoutTime, l.TimeZone, vendor, modseq, modseq)
 	return err
 }
 
 func updateTaskListRow(tx *store.Tx, l *taskList) error {
+	vendor, err := l.vendorPropsText()
+	if err != nil {
+		return err
+	}
 	modseq, err := tx.NextModSeq(typeTaskList)
 	if err != nil {
 		return err
 	}
 	_, err = tx.Exec(`UPDATE tasklists SET name = ?, description = ?, color = ?, sort_order = ?,
 		is_subscribed = ?, is_visible = ?, is_default = ?, default_alerts_with_time = ?,
-		default_alerts_without_time = ?, time_zone = ?, updated_modseq = ? WHERE id = ?`,
+		default_alerts_without_time = ?, time_zone = ?, vendor_props = ?, updated_modseq = ?
+		WHERE id = ?`,
 		l.Name, l.Description, l.Color, l.SortOrder, l.IsSubscribed, l.IsVisible, l.IsDefault,
-		l.AlertsWithTime, l.AlertsWithoutTime, l.TimeZone, modseq, l.ID)
+		l.AlertsWithTime, l.AlertsWithoutTime, l.TimeZone, vendor, modseq, l.ID)
 	return err
 }
 
@@ -308,7 +379,7 @@ func (s *Service) taskListGet(c *jmap.Context, args map[string]any) (map[string]
 		return nil, err
 	}
 	for _, p := range props {
-		if !taskListProps[p] {
+		if !taskListProps[p] && !isVendorProp(p) {
 			return nil, jmap.ArgError("unknown property %q", p)
 		}
 	}
