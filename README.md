@@ -22,7 +22,9 @@ The configuration file (JSON; see `taskmaster.example.json` and the
 * a **user** is an actor who can authenticate;
 * an **account** is a JMAP account, a body of data in its own SQLite file,
   owned by exactly one user, who has complete access to it.  A user may
-  own several accounts, in which case it must name a `primaryAccount`;
+  own several accounts.  A user with one account has it as the Session's
+  primary account; a user with several has no primary account unless it
+  names one with `primaryAccount`;
 * a **credential** is a way a user proves who they are.  There are two
   types.  `loopback` means "requests arriving on the plain `listen`
   address", which at most one user may hold.  `tailscale` names a

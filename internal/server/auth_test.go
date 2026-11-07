@@ -104,24 +104,30 @@ var threeAccounts = map[string]*auth.Account{
 	"guest": {Name: "Guest", Owner: "guest"},
 }
 
+// checkSession fetches the Session as user u and checks its username,
+// its primary tasks account (empty meaning there must be none), and the
+// accounts it lists.
+func checkSession(t *testing.T, m *multiEnv, u *auth.User, username, primary string, accounts []string) {
+	t.Helper()
+	sess := getSession(t, m.as(u).URL)
+	if sess["username"] != username {
+		t.Errorf("%s: username = %v", username, sess["username"])
+	}
+	got, has := sess["primaryAccounts"].(obj)[tasks.Capability]
+	if primary == "" && has {
+		t.Errorf("%s: primary account = %v, want none", username, got)
+	} else if primary != "" && got != primary {
+		t.Errorf("%s: primary account = %v, want %s", username, got, primary)
+	}
+	if got := sessionAccounts(sess); !reflect.DeepEqual(got, accounts) {
+		t.Errorf("%s: accounts = %v, want %v", username, got, accounts)
+	}
+}
+
 func TestSessionListsOnlyOwnedAccounts(t *testing.T) {
 	m := newMultiEnv(t, twoUsers, threeAccounts)
-
-	checkSession := func(user, primary string, accounts []string) {
-		t.Helper()
-		sess := getSession(t, m.as(m.dir.Users[user]).URL)
-		if sess["username"] != user {
-			t.Errorf("%s: username = %v", user, sess["username"])
-		}
-		if got := sess["primaryAccounts"].(obj)[tasks.Capability]; got != primary {
-			t.Errorf("%s: primary account = %v, want %s", user, got, primary)
-		}
-		if got := sessionAccounts(sess); !reflect.DeepEqual(got, accounts) {
-			t.Errorf("%s: accounts = %v, want %v", user, got, accounts)
-		}
-	}
-	checkSession("rjbs", "rjbs", []string{"rjbs", "work"})
-	checkSession("guest", "guest", []string{"guest"})
+	checkSession(t, m, m.dir.Users["rjbs"], "rjbs", "rjbs", []string{"rjbs", "work"})
+	checkSession(t, m, m.dir.Users["guest"], "guest", "guest", []string{"guest"})
 
 	rjbs := getSession(t, m.as(m.dir.Users["rjbs"]).URL)
 	if got := rjbs["accounts"].(obj)["work"].(obj)["name"]; got != "Work" {
@@ -131,6 +137,14 @@ func TestSessionListsOnlyOwnedAccounts(t *testing.T) {
 	if rjbs["state"] == guest["state"] {
 		t.Error("two users with different accounts share a session state")
 	}
+}
+
+func TestSessionWithoutPrimaryAccount(t *testing.T) {
+	m := newMultiEnv(t,
+		map[string]*auth.User{"rjbs": {Credentials: []auth.Credential{{Type: auth.CredLoopback}}}},
+		map[string]*auth.Account{"rjbs": {Owner: "rjbs"}, "work": {Owner: "rjbs"}},
+	)
+	checkSession(t, m, m.dir.Users["rjbs"], "rjbs", "", []string{"rjbs", "work"})
 }
 
 func TestMethodsRouteByAccount(t *testing.T) {

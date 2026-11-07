@@ -24,7 +24,8 @@ Then open <http://127.0.0.1:8081/>.
 ## What it demonstrates
 
 * Bootstrapping from the Session object at `/.well-known/jmap`, using
-  `primaryAccounts` to find the account and `apiUrl` for the API.
+  `primaryAccounts` to find the account (or, if there is no primary, the
+  first account with the tasks capability) and `apiUrl` for the API.
 * `TaskList/get` to populate the sidebar, and `TaskList/set` to create lists
   and destroy them (with `onDestroyRemoveTasks`).
 * `Task/query` with `inTaskList` and `progress` filters, sorted by `due`

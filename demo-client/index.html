@@ -477,7 +477,10 @@ async function main () {
   const res = await fetch('/.well-known/jmap');
   if (!res.ok) throw new Error(`Couldn't fetch the Session object: HTTP ${res.status}`);
   S.session = await res.json();
-  S.accountId = S.session.primaryAccounts[TASKS];
+  // With no primary account, take the first account that has tasks.
+  S.accountId = S.session.primaryAccounts[TASKS]
+    ?? Object.keys(S.session.accounts).sort()
+         .find(id => TASKS in S.session.accounts[id].accountCapabilities);
   if (!S.accountId) throw new Error('The session has no account with the tasks capability.');
 
   await reload();

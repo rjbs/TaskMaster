@@ -116,6 +116,10 @@ func (s *Server) accounts(u *auth.User) map[string]any {
 func (s *Server) session(r *http.Request) map[string]any {
 	base := s.baseURL(r)
 	u := user(r.Context())
+	primary := map[string]any{}
+	if u.PrimaryAccount != "" {
+		primary[tasks.Capability] = u.PrimaryAccount
+	}
 	return map[string]any{
 		"capabilities": map[string]any{
 			jmap.CoreCapability: map[string]any{
@@ -130,16 +134,14 @@ func (s *Server) session(r *http.Request) map[string]any {
 			},
 			tasks.Capability: map[string]any{},
 		},
-		"accounts": s.accounts(u),
-		"primaryAccounts": map[string]any{
-			tasks.Capability: u.PrimaryAccount,
-		},
-		"username":       u.ID,
-		"apiUrl":         base + "/jmap",
-		"downloadUrl":    base + "/jmap/download/{accountId}/{blobId}/{name}?accept={type}",
-		"uploadUrl":      base + "/jmap/upload/{accountId}/",
-		"eventSourceUrl": base + "/jmap/eventsource?types={types}&closeafter={closeafter}&ping={ping}",
-		"state":          s.sessionState(r.Context()),
+		"accounts":        s.accounts(u),
+		"primaryAccounts": primary,
+		"username":        u.ID,
+		"apiUrl":          base + "/jmap",
+		"downloadUrl":     base + "/jmap/download/{accountId}/{blobId}/{name}?accept={type}",
+		"uploadUrl":       base + "/jmap/upload/{accountId}/",
+		"eventSourceUrl":  base + "/jmap/eventsource?types={types}&closeafter={closeafter}&ping={ping}",
+		"state":           s.sessionState(r.Context()),
 	}
 }
 

@@ -45,7 +45,8 @@ type User struct {
 	Accounts []string
 
 	// PrimaryAccount is the account the Session object advertises as
-	// primary for every capability.
+	// primary for every capability, or empty for none.  RFC 8620 §2 lets
+	// a Session name no primary account.
 	PrimaryAccount string
 }
 
@@ -77,7 +78,9 @@ type Directory struct {
 // NewDirectory links users to the accounts they own and indexes
 // credentials.  It reports a bad directory rather than guessing: an
 // account with an unknown owner, two users holding the loopback
-// credential, or a user who owns several accounts but names no primary.
+// credential, or a primary account the user does not own.  A user who
+// owns exactly one account and names no primary gets that one as primary;
+// a user who owns several gets none unless one is named.
 func NewDirectory(users map[string]*User, accounts map[string]*Account) (*Directory, error) {
 	d := &Directory{
 		Users:     users,
@@ -103,9 +106,7 @@ func NewDirectory(users map[string]*User, accounts map[string]*Account) (*Direct
 			return nil, fmt.Errorf("user %q owns no accounts", id)
 		case u.PrimaryAccount == "" && len(u.Accounts) == 1:
 			u.PrimaryAccount = u.Accounts[0]
-		case u.PrimaryAccount == "":
-			return nil, fmt.Errorf("user %q owns several accounts and must name a primaryAccount", id)
-		case !u.HasAccount(u.PrimaryAccount):
+		case u.PrimaryAccount != "" && !u.HasAccount(u.PrimaryAccount):
 			return nil, fmt.Errorf("user %q names primaryAccount %q, which it does not own", id, u.PrimaryAccount)
 		}
 		for _, c := range u.Credentials {

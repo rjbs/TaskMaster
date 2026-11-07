@@ -80,10 +80,15 @@ func TestParse(t *testing.T) {
 	checkParse(t, "unknown field", `{ "lisen": "x", "users": {}, "accounts": {} }`, "unknown field")
 	checkParse(t, "no accounts", `{ "users": { "rjbs": {} }, "accounts": {} }`, "at least one account")
 	checkParse(t, "unknown owner", `{ "users": {}, "accounts": { "a": { "owner": "nobody" } } }`, "unknown user")
-	checkParse(t, "no primary", `{
+	cfg = checkParse(t, "no primary", `{
 		"users": { "rjbs": {} },
 		"accounts": { "a": { "owner": "rjbs" }, "b": { "owner": "rjbs" } }
-	}`, "primaryAccount")
+	}`, "")
+	if cfg != nil {
+		if got := cfg.Directory.Users["rjbs"].PrimaryAccount; got != "" {
+			t.Errorf("several accounts should imply no primary: got %q", got)
+		}
+	}
 	checkParse(t, "bad primary", `{
 		"users": { "rjbs": { "primaryAccount": "zzz" } },
 		"accounts": { "a": { "owner": "rjbs" } }
