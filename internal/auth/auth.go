@@ -17,9 +17,7 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -216,22 +214,6 @@ func (d *Directory) BearerUser(token string) *User {
 	return d.bearer[HashToken(token)]
 }
 
-// HashToken gives the digest a bearer credential stores for a token.
-func HashToken(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
-}
-
-// NewToken makes a random bearer token.  The "tm_" prefix makes a leaked
-// token easy to recognize and to scan for.
-func NewToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return "tm_" + base64.RawURLEncoding.EncodeToString(b), nil
-}
-
 // TailscaleUser is the user holding the given Tailscale login, or nil.
 // If the credential names accounts, the user returned owns only those.
 func (d *Directory) TailscaleUser(login string) *User { return d.tailscale[login] }
@@ -264,7 +246,14 @@ func Bearer(d *Directory, reject func(r *http.Request, why string), next http.Ha
 			next.ServeHTTP(w, r)
 			return
 		}
-		u := d.BearerUser(strings.TrimSpace(token))
+		token = strings.TrimSpace(token)
+		if !WellFormedToken(token) {
+			reject(r, "malformed bearer token")
+			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+			http.Error(w, "malformed bearer token", http.StatusUnauthorized)
+			return
+		}
+		u := d.BearerUser(token)
 		if u == nil {
 			reject(r, "unknown bearer token")
 			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)

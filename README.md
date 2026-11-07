@@ -52,7 +52,11 @@ Relative paths are resolved against the directory holding the config file.
 ### Bearer tokens
 
 `taskmaster new-token` makes a random token and prints it, along with
-the credential that accepts it:
+the credential that accepts it.  A token looks like
+`taskmaster-` followed by 49 letters and digits, the last six of which
+are a checksum of the rest, so a secret scanner can recognize a real
+token by itself; the server refuses a malformed one before looking it
+up.  The credential is:
 
     { "type": "bearer", "tokenHash": "1ae16ce2...b21de2" }
 

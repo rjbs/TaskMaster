@@ -340,14 +340,17 @@ func checkAuthorized(t *testing.T, url, authz string, wantStatus int, wantUser s
 }
 
 func TestBearerMiddleware(t *testing.T) {
+	workToken, _ := auth.NewToken()
+	guestToken, _ := auth.NewToken()
+	unknownToken, _ := auth.NewToken()
 	m := newMultiEnv(t,
 		map[string]*auth.User{
 			"rjbs": {Credentials: []auth.Credential{
 				{Type: auth.CredLoopback},
-				{Type: auth.CredBearer, TokenHash: auth.HashToken("tm_work"), AccountIDs: []string{"work"}},
+				{Type: auth.CredBearer, TokenHash: auth.HashToken(workToken), AccountIDs: []string{"work"}},
 			}},
 			"guest": {Credentials: []auth.Credential{
-				{Type: auth.CredBearer, TokenHash: strings.ToUpper(auth.HashToken("tm_guest"))},
+				{Type: auth.CredBearer, TokenHash: strings.ToUpper(auth.HashToken(guestToken))},
 			}},
 		},
 		threeAccounts,
@@ -358,12 +361,13 @@ func TestBearerMiddleware(t *testing.T) {
 	plain := httptest.NewServer(auth.Bearer(m.dir, reject, auth.Loopback(m.dir, m.srv)))
 	t.Cleanup(plain.Close)
 	checkAuthorized(t, plain.URL, "", 200, "rjbs", []string{"rjbs", "work"})
-	checkAuthorized(t, plain.URL, "Bearer tm_work", 200, "rjbs", []string{"work"})
-	checkAuthorized(t, plain.URL, "Bearer tm_guest", 200, "guest", []string{"guest"})
-	checkAuthorized(t, plain.URL, "bearer tm_guest", 200, "guest", []string{"guest"})
+	checkAuthorized(t, plain.URL, "Bearer "+workToken, 200, "rjbs", []string{"work"})
+	checkAuthorized(t, plain.URL, "Bearer "+guestToken, 200, "guest", []string{"guest"})
+	checkAuthorized(t, plain.URL, "bearer "+guestToken, 200, "guest", []string{"guest"})
 	checkAuthorized(t, plain.URL, "Basic dXNlcjpwYXNz", 200, "rjbs", []string{"rjbs", "work"})
-	checkAuthorized(t, plain.URL, "Bearer tm_nonsense", 401, "", nil)
-	if len(rejected) != 1 {
+	checkAuthorized(t, plain.URL, "Bearer "+unknownToken, 401, "", nil)
+	checkAuthorized(t, plain.URL, "Bearer "+guestToken[:59]+"x", 401, "", nil)
+	if !reflect.DeepEqual(rejected, []string{"unknown bearer token", "malformed bearer token"}) {
 		t.Errorf("rejections reported: %v", rejected)
 	}
 
@@ -374,6 +378,6 @@ func TestBearerMiddleware(t *testing.T) {
 	}
 	tailnet := httptest.NewServer(auth.Bearer(m.dir, reject, auth.Tailscale(m.dir, whois, reject, m.srv)))
 	t.Cleanup(tailnet.Close)
-	checkAuthorized(t, tailnet.URL, "Bearer tm_guest", 200, "guest", []string{"guest"})
+	checkAuthorized(t, tailnet.URL, "Bearer "+guestToken, 200, "guest", []string{"guest"})
 	checkAuthorized(t, tailnet.URL, "", 403, "", nil)
 }
