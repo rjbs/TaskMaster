@@ -14,7 +14,8 @@
 //	      "credentials": [
 //	        { "type": "loopback" },
 //	        { "type": "tailscale", "login": "rjbs@github" },
-//	        { "type": "tailscale", "login": "rjbs-work@github", "accountIds": [ "work" ] }
+//	        { "type": "tailscale", "login": "rjbs-work@github", "accountIds": [ "work" ] },
+//	        { "type": "bearer", "tokenHash": "<from taskmaster new-token>" }
 //	      ],
 //	      "primaryAccount": "rjbs"
 //	    }
@@ -93,6 +94,7 @@ type User struct {
 type Credential struct {
 	Type       string   `json:"type"`
 	Login      string   `json:"login"`
+	TokenHash  string   `json:"tokenHash"`
 	AccountIDs []string `json:"accountIds"`
 }
 
@@ -179,7 +181,7 @@ func Parse(raw []byte, baseDir string) (*Config, error) {
 		}
 		au := &auth.User{PrimaryAccount: u.PrimaryAccount}
 		for _, c := range u.Credentials {
-			au.Credentials = append(au.Credentials, auth.Credential{Type: c.Type, Login: c.Login, AccountIDs: c.AccountIDs})
+			au.Credentials = append(au.Credentials, auth.Credential{Type: c.Type, Login: c.Login, TokenHash: c.TokenHash, AccountIDs: c.AccountIDs})
 		}
 		users[id] = au
 	}

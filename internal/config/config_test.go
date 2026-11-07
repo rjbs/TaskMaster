@@ -123,6 +123,26 @@ func TestParse(t *testing.T) {
 		] } },
 		"accounts": { "a": { "owner": "a" } }
 	}`, "claims tailscale login \"a@github\" twice")
+	cfg = checkParse(t, "bearer token", `{
+		"users": { "a": { "credentials": [
+			{ "type": "bearer", "tokenHash": "342cc509ec55617126eb5d621799caf62bfa8bb4b726e1a534fe7524360355ef" }
+		] } },
+		"accounts": { "a": { "owner": "a" } }
+	}`, "")
+	if cfg != nil && cfg.Directory.BearerUser("tm_x") == nil {
+		t.Error("bearer token not indexed")
+	}
+	checkParse(t, "bad tokenHash", `{
+		"users": { "a": { "credentials": [ { "type": "bearer", "tokenHash": "tm_x" } ] } },
+		"accounts": { "a": { "owner": "a" } }
+	}`, "not a hex SHA-256 digest")
+	checkParse(t, "one token twice", `{
+		"users": {
+			"a": { "credentials": [ { "type": "bearer", "tokenHash": "342cc509ec55617126eb5d621799caf62bfa8bb4b726e1a534fe7524360355ef" } ] },
+			"b": { "credentials": [ { "type": "bearer", "tokenHash": "342CC509EC55617126EB5D621799CAF62BFA8BB4B726E1A534FE7524360355EF" } ] }
+		},
+		"accounts": { "a": { "owner": "a" }, "b": { "owner": "b" } }
+	}`, "both claim a bearer token")
 	checkParse(t, "empty accountIds", `{
 		"users": { "a": { "credentials": [ { "type": "loopback", "accountIds": [] } ] } },
 		"accounts": { "a": { "owner": "a" } }

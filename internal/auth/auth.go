@@ -17,10 +17,15 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"slices"
 	"sort"
+	"strings"
 )
 
 // Credential types.
@@ -32,6 +37,11 @@ const (
 	// CredTailscale identifies a user by the login name Tailscale reports
 	// for the node the request came from.
 	CredTailscale = "tailscale"
+
+	// CredBearer identifies a user by the bearer token in the request's
+	// Authorization header (RFC 6750).  The directory holds only the
+	// token's SHA-256 digest.
+	CredBearer = "bearer"
 )
 
 type Credential struct {
@@ -40,6 +50,10 @@ type Credential struct {
 	// Login is the Tailscale login name (like "rjbs@github") for a
 	// CredTailscale credential, and empty otherwise.
 	Login string
+
+	// TokenHash is the lowercase hex SHA-256 digest of the token for a
+	// CredBearer credential, and empty otherwise.
+	TokenHash string
 
 	// AccountIDs, if not nil, limits requests made with this credential
 	// to those accounts, which the user must own.  An empty, non-nil
@@ -94,6 +108,7 @@ type Directory struct {
 
 	loopback  *User
 	tailscale map[string]*User
+	bearer    map[string]*User // by token digest
 }
 
 // NewDirectory links users to the accounts they own and indexes
@@ -108,6 +123,7 @@ func NewDirectory(users map[string]*User, accounts map[string]*Account) (*Direct
 		Users:     users,
 		Accounts:  accounts,
 		tailscale: map[string]*User{},
+		bearer:    map[string]*User{},
 	}
 	for _, u := range users {
 		u.Accounts = nil
@@ -158,6 +174,15 @@ func NewDirectory(users map[string]*User, accounts map[string]*Account) (*Direct
 					return nil, claimedTwice(other.ID, id, fmt.Sprintf("tailscale login %q", c.Login))
 				}
 				d.tailscale[c.Login] = as
+			case CredBearer:
+				digest := strings.ToLower(c.TokenHash)
+				if b, err := hex.DecodeString(digest); err != nil || len(b) != sha256.Size {
+					return nil, fmt.Errorf("user %q has a bearer credential whose tokenHash is not a hex SHA-256 digest", id)
+				}
+				if other, dup := d.bearer[digest]; dup {
+					return nil, claimedTwice(other.ID, id, "a bearer token")
+				}
+				d.bearer[digest] = as
 			default:
 				return nil, fmt.Errorf("user %q has a credential of unknown type %q", id, c.Type)
 			}
@@ -181,6 +206,32 @@ func claimedTwice(first, second, what string) error {
 // accounts, the user returned owns only those.
 func (d *Directory) LoopbackUser() *User { return d.loopback }
 
+// BearerUser is the user holding the given bearer token, or nil.  If the
+// credential names accounts, the user returned owns only those.
+//
+// Only digests are stored, so the lookup compares digests of the token
+// rather than the token itself, and a map lookup's timing reveals nothing
+// useful about any stored token.  -- claude, 2026-11-07
+func (d *Directory) BearerUser(token string) *User {
+	return d.bearer[HashToken(token)]
+}
+
+// HashToken gives the digest a bearer credential stores for a token.
+func HashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// NewToken makes a random bearer token.  The "tm_" prefix makes a leaked
+// token easy to recognize and to scan for.
+func NewToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return "tm_" + base64.RawURLEncoding.EncodeToString(b), nil
+}
+
 // TailscaleUser is the user holding the given Tailscale login, or nil.
 // If the credential names accounts, the user returned owns only those.
 func (d *Directory) TailscaleUser(login string) *User { return d.tailscale[login] }
@@ -198,12 +249,44 @@ func UserFrom(ctx context.Context) (*User, bool) {
 	return u, ok && u != nil
 }
 
+// Bearer is middleware for any listener.  A request with a bearer token
+// in its Authorization header acts as the user holding that token, and
+// one with an unknown token is refused, rather than passed along to be
+// identified by its listener: a client that sent a token expects to be
+// that token's user, and quietly being someone else would hide a broken
+// token.  Requests without a bearer token go to next unchanged, which
+// identifies them by the listener's own means.  Refusals are reported
+// through reject.
+func Bearer(d *Directory, reject func(r *http.Request, why string), next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scheme, token, ok := strings.Cut(r.Header.Get("Authorization"), " ")
+		if !ok || !strings.EqualFold(scheme, "Bearer") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		u := d.BearerUser(strings.TrimSpace(token))
+		if u == nil {
+			reject(r, "unknown bearer token")
+			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+			http.Error(w, "unknown bearer token", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(WithUser(r.Context(), u)))
+	})
+}
+
 // Loopback is middleware for the plain listener: every request acts as the
-// loopback user.  With no such user configured, every request is refused.
+// loopback user, unless it has already been authenticated, as by Bearer.
+// With no loopback user configured, every other request is refused.
 func Loopback(d *Directory, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := UserFrom(r.Context()); ok {
+			next.ServeHTTP(w, r)
+			return
+		}
 		u := d.LoopbackUser()
 		if u == nil {
+			w.Header().Set("WWW-Authenticate", "Bearer")
 			http.Error(w, "no user is configured for unauthenticated access", http.StatusUnauthorized)
 			return
 		}
@@ -223,11 +306,16 @@ type Identity struct {
 type WhoIsFunc func(ctx context.Context, remoteAddr string) (Identity, error)
 
 // Tailscale is middleware for the tailnet listener: the request acts as the
-// user holding the connecting node's login as a credential.  Tagged nodes
+// user holding the connecting node's login as a credential, unless it has
+// already been authenticated, as by Bearer.  Otherwise, tagged nodes
 // have no user and are refused, as is any login nobody holds.  Refusals are
 // reported through reject, so an operator can see which login to add.
 func Tailscale(d *Directory, whois WhoIsFunc, reject func(r *http.Request, why string), next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := UserFrom(r.Context()); ok {
+			next.ServeHTTP(w, r)
+			return
+		}
 		id, err := whois(r.Context(), r.RemoteAddr)
 		if err != nil {
 			reject(r, "whois failed: "+err.Error())

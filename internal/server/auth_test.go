@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -258,9 +259,7 @@ func TestUnauthenticatedRequestsAreRefused(t *testing.T) {
 	)
 	ts := httptest.NewServer(auth.Loopback(noLoopback, m.srv))
 	t.Cleanup(ts.Close)
-	if resp, _ := http.Get(ts.URL + "/.well-known/jmap"); resp.StatusCode != 401 {
-		t.Errorf("no loopback user: status %d", resp.StatusCode)
-	}
+	checkAuthorized(t, ts.URL, "", 401, "", nil)
 }
 
 func TestTailscaleMiddleware(t *testing.T) {
@@ -304,4 +303,77 @@ func TestTailscaleMiddleware(t *testing.T) {
 	check("unknown login", auth.Identity{Login: "stranger@example"}, nil, 403, "")
 	check("tagged node", auth.Identity{Login: "tagged-devices", Tagged: true}, nil, 403, "")
 	check("whois failure", auth.Identity{}, errors.New("no such peer"), 401, "")
+}
+
+// checkAuthorized fetches the Session from url with the given
+// Authorization header (none if empty) and checks the status and, for a
+// success, the user and accounts the Session describes.
+func checkAuthorized(t *testing.T, url, authz string, wantStatus int, wantUser string, wantAccounts []string) {
+	t.Helper()
+	req, _ := http.NewRequest("GET", url+"/.well-known/jmap", nil)
+	if authz != "" {
+		req.Header.Set("Authorization", authz)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != wantStatus {
+		t.Errorf("%q: status %d, want %d", authz, resp.StatusCode, wantStatus)
+		return
+	}
+	if wantStatus != 200 {
+		if resp.StatusCode == 401 && resp.Header.Get("WWW-Authenticate") == "" {
+			t.Errorf("%q: 401 without WWW-Authenticate", authz)
+		}
+		return
+	}
+	var sess obj
+	json.NewDecoder(resp.Body).Decode(&sess)
+	if sess["username"] != wantUser {
+		t.Errorf("%q: username %v, want %s", authz, sess["username"], wantUser)
+	}
+	if got := sessionAccounts(sess); !reflect.DeepEqual(got, wantAccounts) {
+		t.Errorf("%q: accounts %v, want %v", authz, got, wantAccounts)
+	}
+}
+
+func TestBearerMiddleware(t *testing.T) {
+	m := newMultiEnv(t,
+		map[string]*auth.User{
+			"rjbs": {Credentials: []auth.Credential{
+				{Type: auth.CredLoopback},
+				{Type: auth.CredBearer, TokenHash: auth.HashToken("tm_work"), AccountIDs: []string{"work"}},
+			}},
+			"guest": {Credentials: []auth.Credential{
+				{Type: auth.CredBearer, TokenHash: strings.ToUpper(auth.HashToken("tm_guest"))},
+			}},
+		},
+		threeAccounts,
+	)
+	var rejected []string
+	reject := func(r *http.Request, why string) { rejected = append(rejected, why) }
+
+	plain := httptest.NewServer(auth.Bearer(m.dir, reject, auth.Loopback(m.dir, m.srv)))
+	t.Cleanup(plain.Close)
+	checkAuthorized(t, plain.URL, "", 200, "rjbs", []string{"rjbs", "work"})
+	checkAuthorized(t, plain.URL, "Bearer tm_work", 200, "rjbs", []string{"work"})
+	checkAuthorized(t, plain.URL, "Bearer tm_guest", 200, "guest", []string{"guest"})
+	checkAuthorized(t, plain.URL, "bearer tm_guest", 200, "guest", []string{"guest"})
+	checkAuthorized(t, plain.URL, "Basic dXNlcjpwYXNz", 200, "rjbs", []string{"rjbs", "work"})
+	checkAuthorized(t, plain.URL, "Bearer tm_nonsense", 401, "", nil)
+	if len(rejected) != 1 {
+		t.Errorf("rejections reported: %v", rejected)
+	}
+
+	// On the tailnet, a token admits even a tagged node, which has no
+	// login of its own.
+	whois := func(ctx context.Context, remoteAddr string) (auth.Identity, error) {
+		return auth.Identity{Login: "tagged-devices", Tagged: true}, nil
+	}
+	tailnet := httptest.NewServer(auth.Bearer(m.dir, reject, auth.Tailscale(m.dir, whois, reject, m.srv)))
+	t.Cleanup(tailnet.Close)
+	checkAuthorized(t, tailnet.URL, "Bearer tm_guest", 200, "guest", []string{"guest"})
+	checkAuthorized(t, tailnet.URL, "", 403, "", nil)
 }

@@ -28,7 +28,9 @@ The configuration file (JSON; see `taskmaster.example.json` and the
 * a **credential** is a way a user proves who they are.  There are two
   types.  `loopback` means "requests arriving on the plain `listen`
   address", which at most one user may hold.  `tailscale` names a
-  Tailscale login (like `rjbs`).  A credential may also give
+  Tailscale login (like `rjbs`).  `bearer` accepts a token sent as
+  `Authorization: Bearer <token>`, on either listener; see below.  A
+  credential may also give
   `accountIds`, a non-empty list of the user's accounts; requests made
   with that credential see only those accounts.  If the user's primary
   account is not among them, they see no primary account.
@@ -46,6 +48,26 @@ method call naming any other account fails with `accountNotFound`.
 | `demoClient`| `true`             | serve the TaskBlaster page at `/` on every listener  |
 
 Relative paths are resolved against the directory holding the config file.
+
+### Bearer tokens
+
+`taskmaster new-token` makes a random token and prints it, along with
+the credential that accepts it:
+
+    { "type": "bearer", "tokenHash": "1ae16ce2...b21de2" }
+
+Add the credential to a user, and give the token to the client.  The
+configuration holds only the token's SHA-256 digest, so a copy of the
+file does not grant access; a lost token cannot be recovered, only
+replaced.  Add `accountIds` to the credential to limit what the token
+can see.
+
+A request with a bearer token acts as that token's user on either
+listener, whatever the listener would otherwise decide; a tagged
+Tailscale node can use one.  A request with an unknown token is refused
+rather than treated as if it had none.  The plain listener speaks HTTP,
+so a token sent to it travels unencrypted; keep it on the loopback
+address, or put TLS in front of it.
 
 ### Tailscale
 

@@ -31,7 +31,23 @@ import (
 func main() {
 	configPath := flag.String("config", "taskmaster.json", "path to the configuration file")
 	verbose := flag.Bool("v", false, "log at debug level (includes Tailscale's chatter)")
+	flag.Usage = func() {
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: %s [-config FILE] [-v]\n       %s new-token\n", os.Args[0], os.Args[0])
+		flag.PrintDefaults()
+	}
 	flag.Parse()
+
+	switch {
+	case flag.NArg() == 1 && flag.Arg(0) == "new-token":
+		if err := newToken(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	case flag.NArg() > 0:
+		flag.Usage()
+		os.Exit(2)
+	}
 
 	level := slog.LevelInfo
 	if *verbose {
@@ -43,6 +59,18 @@ func main() {
 		logger.Error("taskmaster failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+// newToken prints a fresh bearer token, for the client, and the credential
+// that accepts it, for the configuration file.
+func newToken() error {
+	token, err := auth.NewToken()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("token (give this to the client; it is not stored anywhere):\n  %s\n\n", token)
+	fmt.Printf("credential (add this to a user's credentials):\n  { \"type\": \"bearer\", \"tokenHash\": \"%s\" }\n", auth.HashToken(token))
+	return nil
 }
 
 func run(logger *slog.Logger, configPath string) error {
@@ -102,6 +130,12 @@ func run(logger *slog.Logger, configPath string) error {
 		Logger:    logger,
 	})
 
+	reject := func(listener string) func(*http.Request, string) {
+		return func(r *http.Request, why string) {
+			logger.Warn("refused request", "via", listener, "from", r.RemoteAddr, "why", why)
+		}
+	}
+
 	var servers []*http.Server
 	errs := make(chan error, 2)
 	serve := func(name string, ln net.Listener, h http.Handler) {
@@ -122,9 +156,9 @@ func run(logger *slog.Logger, configPath string) error {
 		if u := cfg.Directory.LoopbackUser(); u != nil {
 			logger.Info("listening", "addr", ln.Addr(), "user", u.ID)
 		} else {
-			logger.Warn("listening, but no user holds the loopback credential, so every request will be refused", "addr", ln.Addr())
+			logger.Warn("listening, but no user holds the loopback credential, so only requests with a bearer token will be served", "addr", ln.Addr())
 		}
-		serve("plain", ln, auth.Loopback(cfg.Directory, srv))
+		serve("plain", ln, auth.Bearer(cfg.Directory, reject("plain"), auth.Loopback(cfg.Directory, srv)))
 	}
 
 	if ts := cfg.Tailscale; ts != nil {
@@ -137,11 +171,8 @@ func run(logger *slog.Logger, configPath string) error {
 		if err != nil {
 			return fmt.Errorf("tailnet listener: %w", err)
 		}
-		reject := func(r *http.Request, why string) {
-			logger.Warn("refused tailscale request", "from", r.RemoteAddr, "why", why)
-		}
 		logger.Info("listening on tailnet", "url", node.URL(*ts.HTTPS))
-		serve("tailnet", ln, auth.Tailscale(cfg.Directory, node.WhoIs, reject, srv))
+		serve("tailnet", ln, auth.Bearer(cfg.Directory, reject("tailnet"), auth.Tailscale(cfg.Directory, node.WhoIs, reject("tailnet"), srv)))
 	}
 
 	select {
