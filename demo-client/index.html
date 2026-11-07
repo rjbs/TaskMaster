@@ -64,6 +64,23 @@
   .lists li.selected button.pick { font-weight: 700; }
   .lists li button.pick .dot { margin-right: 8px; }
   .lists form { display: flex; gap: 6px; margin-top: 12px; }
+
+  .account { position: relative; }
+  .account button.chooser {
+    border: 0; padding: 0; background: none;
+    font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit;
+  }
+  .account button.chooser::after { content: " \25BE"; }
+  .account button.chooser:hover { color: var(--black); }
+  .account .menu {
+    position: absolute; z-index: 1; top: 100%; left: 0;
+    min-width: 100%; padding: 4px 0;
+    background: #fff; border: 1px solid var(--black);
+    font-size: 15px; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--black);
+  }
+  .account .menu button { flex: 1; text-align: left; border: 0; padding: 4px 10px; white-space: nowrap; }
+  .account .menu button:hover { background: #eee; }
+  .account .menu li.selected button { font-weight: 700; }
   .lists form input { flex: 1; min-width: 0; }
 
   .tasks header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
@@ -133,7 +150,7 @@
 
   <div class="cols">
     <aside class="lists">
-      <h2>Lists</h2>
+      <h2 class="account" id="account">Lists</h2>
       <ul id="lists"></ul>
       <form id="add-list">
         <input name="name" placeholder="New list" required autocomplete="off">
@@ -173,6 +190,7 @@ const S = {
   showDone:  false,
   listState: null,
   taskState: null,
+  menuOpen:  false,  // whether the account menu is showing
 };
 
 const $ = (id) => document.getElementById(id);
@@ -246,8 +264,13 @@ async function set (type, args) {
 
 // ---- Loading --------------------------------------------------------------
 
+// Both loaders drop their results if the account changed while they were
+// waiting, so a slow response can't paint one account's data over
+// another's. -- claude, 2026-11-07
 async function loadLists () {
+  const accountId = S.accountId;
   const res = await call('TaskList/get', { ids: null });
+  if (accountId !== S.accountId) return;
   S.listState = res.state;
   S.lists = res.list.sort((a, b) => (a.sortOrder - b.sortOrder) || a.name.localeCompare(b.name));
   if (S.listId && !S.lists.some(l => l.id === S.listId)) S.listId = null;
@@ -259,6 +282,7 @@ async function loadTasks () {
   if (S.listId)   filter.inTaskList = S.listId;
   if (!S.showDone) filter.progress = ['needs-action', 'in-process'];
 
+  const accountId = S.accountId;
   const [query, got] = await calls(
     ['Task/query', {
       filter,
@@ -269,6 +293,7 @@ async function loadTasks () {
       '#ids': { resultOf: '0', name: 'Task/query', path: '/ids' },
     }],
   );
+  if (accountId !== S.accountId) return;
   const byId = new Map(got.list.map(t => [t.id, t]));
 
   S.taskState = got.state;
@@ -280,6 +305,38 @@ async function reload () {
   clearError();
   await loadLists();
   await loadTasks();
+}
+
+// ---- Accounts -------------------------------------------------------------
+
+// The accounts that have tasks, in menu order: by name, then by id.
+function taskAccounts () {
+  return Object.entries(S.session.accounts)
+    .filter(([, acct]) => TASKS in acct.accountCapabilities)
+    .map(([id, acct]) => ({ id, name: acct.name }))
+    .sort((a, b) => a.name.localeCompare(b.name) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+// The account to start with: the primary one if there is one, otherwise
+// the tasks account with the lowest id.  Going by id rather than by name
+// means renaming an account never changes which one is picked.
+// -- claude, 2026-11-07
+function initialAccountId () {
+  const primary = S.session.primaryAccounts[TASKS];
+  if (primary) return primary;
+  return taskAccounts().map(a => a.id).sort()[0];
+}
+
+function switchAccount (id) {
+  S.menuOpen = false;
+  if (id !== S.accountId) {
+    Object.assign(S, { accountId: id, listId: null, lists: [], tasks: [], listState: null, taskState: null });
+    renderLists();
+    renderTasks();
+    reload().catch(showError);
+  }
+  renderAccount();
+  focusChooser();
 }
 
 // ---- Push -----------------------------------------------------------------
@@ -368,6 +425,36 @@ async function destroyList (list) {
 }
 
 // ---- Rendering ------------------------------------------------------------
+
+function focusChooser () { $('account').querySelector('button.chooser')?.focus(); }
+
+// The sidebar heading names the account.  With more than one account to
+// choose from, it is also a button that opens a menu of them.
+function renderAccount () {
+  const h = $('account');
+  const accounts = taskAccounts();
+  const name = S.session.accounts[S.accountId].name;
+  document.title = accounts.length > 1 ? `${name} · TaskBlaster` : 'TaskBlaster';
+
+  if (accounts.length < 2) {
+    h.replaceChildren(name);
+    return;
+  }
+
+  const chooser = el('button', {
+    class: 'chooser', type: 'button', title: 'Switch account',
+    'aria-haspopup': 'true', 'aria-expanded': String(S.menuOpen),
+    onclick: () => { S.menuOpen = !S.menuOpen; renderAccount(); if (!S.menuOpen) focusChooser(); },
+  }, name);
+  h.replaceChildren(chooser);
+  if (!S.menuOpen) return;
+
+  const menu = el('ul', { class: 'menu' }, ...accounts.map(acct =>
+    el('li', { class: acct.id === S.accountId ? 'selected' : '' },
+      el('button', { type: 'button', onclick: () => switchAccount(acct.id) }, acct.name))));
+  h.append(menu);
+  (menu.querySelector('li.selected button') ?? menu.querySelector('button')).focus();
+}
 
 function renderLists () {
   const ul = $('lists');
@@ -468,6 +555,21 @@ $('add-list').addEventListener('submit', (ev) => {
   createList(name).then(() => form.reset()).catch(showError);
 });
 
+// Clicks inside the heading re-render it, detaching the clicked element,
+// so ask whether the heading was on the event's path rather than whether
+// it contains the target now. -- claude, 2026-11-07
+document.addEventListener('click', (ev) => {
+  if (S.menuOpen && !ev.composedPath().includes($('account'))) { S.menuOpen = false; renderAccount(); }
+});
+
+document.addEventListener('keydown', (ev) => {
+  if (S.menuOpen && ev.key === 'Escape') {
+    S.menuOpen = false;
+    renderAccount();
+    focusChooser();
+  }
+});
+
 $('show-done').addEventListener('change', (ev) => {
   S.showDone = ev.target.checked;
   loadTasks().catch(showError);
@@ -477,11 +579,9 @@ async function main () {
   const res = await fetch('/.well-known/jmap');
   if (!res.ok) throw new Error(`Couldn't fetch the Session object: HTTP ${res.status}`);
   S.session = await res.json();
-  // With no primary account, take the first account that has tasks.
-  S.accountId = S.session.primaryAccounts[TASKS]
-    ?? Object.keys(S.session.accounts).sort()
-         .find(id => TASKS in S.session.accounts[id].accountCapabilities);
+  S.accountId = initialAccountId();
   if (!S.accountId) throw new Error('The session has no account with the tasks capability.');
+  renderAccount();
 
   await reload();
   connectPush();

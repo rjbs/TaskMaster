@@ -25,7 +25,10 @@ Then open <http://127.0.0.1:8081/>.
 
 * Bootstrapping from the Session object at `/.well-known/jmap`, using
   `primaryAccounts` to find the account (or, if there is no primary, the
-  first account with the tasks capability) and `apiUrl` for the API.
+  tasks account with the lowest id) and `apiUrl` for the API.
+* Switching accounts: the sidebar heading is the account's name, and when
+  the Session offers more than one tasks account, clicking it opens a menu
+  of them.
 * `TaskList/get` to populate the sidebar, and `TaskList/set` to create lists
   and destroy them (with `onDestroyRemoveTasks`).
 * `Task/query` with `inTaskList` and `progress` filters, sorted by `due`
