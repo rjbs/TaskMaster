@@ -14,6 +14,24 @@ The Session object is at `/.well-known/jmap`, the API at `/jmap`, and the
 push event source at `/jmap/eventsource`.  On first start, each account
 gets a default TaskList named "Tasks".
 
+### Building for Linux
+
+To build a Linux binary on any machine with Go, for copying to a server:
+
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o taskmaster-linux ./cmd/taskmaster
+
+The SQLite driver is pure Go, so with cgo off the result is a single
+statically linked file with no runtime dependencies; copy it over, with
+a configuration file, and run it.  Use `GOARCH=arm64` for ARM servers.
+`-ldflags="-s -w"` strips debugging symbols, which only makes the file
+smaller.  `taskmaster-linux` is in `.gitignore`.
+
+`go version -m taskmaster-linux` shows how a binary was built and from
+which commit, with `vcs.modified=true` if the working tree was dirty.
+
+If the server will join the tailnet, do not bring along the Tailscale
+state from a Mac; see the Tailscale section below.
+
 ## Users, accounts, and credentials
 
 The configuration file (JSON; see `taskmaster.example.json` and the
