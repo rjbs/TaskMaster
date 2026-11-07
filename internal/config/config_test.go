@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -93,6 +94,39 @@ func TestParse(t *testing.T) {
 		"users": { "rjbs": { "primaryAccount": "zzz" } },
 		"accounts": { "a": { "owner": "rjbs" } }
 	}`, "does not own")
+	cfg = checkParse(t, "limited credential", `{
+		"users": { "rjbs": { "credentials": [
+			{ "type": "loopback" },
+			{ "type": "tailscale", "login": "work@github", "accountIds": [ "work", "side" ] }
+		] } },
+		"accounts": { "rjbs": { "owner": "rjbs" }, "work": { "owner": "rjbs" }, "side": { "owner": "rjbs" } }
+	}`, "")
+	if cfg != nil {
+		if got := cfg.Directory.LoopbackUser().Accounts; len(got) != 3 {
+			t.Errorf("unlimited credential accounts: got %v", got)
+		}
+		if got := cfg.Directory.TailscaleUser("work@github").Accounts; !slices.Equal(got, []string{"side", "work"}) {
+			t.Errorf("limited credential accounts: got %v", got)
+		}
+	}
+	checkParse(t, "credential for unowned account", `{
+		"users": {
+			"a": { "credentials": [ { "type": "loopback", "accountIds": [ "a", "b" ] } ] },
+			"b": {}
+		},
+		"accounts": { "a": { "owner": "a" }, "b": { "owner": "b" } }
+	}`, "does not own")
+	checkParse(t, "one login twice", `{
+		"users": { "a": { "credentials": [
+			{ "type": "tailscale", "login": "a@github" },
+			{ "type": "tailscale", "login": "a@github", "accountIds": [ "a" ] }
+		] } },
+		"accounts": { "a": { "owner": "a" } }
+	}`, "claims tailscale login \"a@github\" twice")
+	checkParse(t, "empty accountIds", `{
+		"users": { "a": { "credentials": [ { "type": "loopback", "accountIds": [] } ] } },
+		"accounts": { "a": { "owner": "a" } }
+	}`, "empty accountIds")
 	checkParse(t, "two loopbacks", `{
 		"users": {
 			"a": { "credentials": [ { "type": "loopback" } ] },

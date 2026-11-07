@@ -8,6 +8,11 @@
 // user may own several.  A credential is one way a user proves who they
 // are.  There is no sharing, no admin, and no notion of rights beyond
 // ownership.
+//
+// A credential may name some of its user's accounts, in which case a
+// request authenticated by it sees only those, as if the user owned
+// nothing else.  That allows, say, a device that should see only a work
+// account without inventing a second user to own it.
 package auth
 
 import (
@@ -35,6 +40,11 @@ type Credential struct {
 	// Login is the Tailscale login name (like "rjbs@github") for a
 	// CredTailscale credential, and empty otherwise.
 	Login string
+
+	// AccountIDs, if not nil, limits requests made with this credential
+	// to those accounts, which the user must own.  An empty, non-nil
+	// list is an error, since such a credential could see nothing.
+	AccountIDs []string
 }
 
 type User struct {
@@ -48,6 +58,17 @@ type User struct {
 	// primary for every capability, or empty for none.  RFC 8620 §2 lets
 	// a Session name no primary account.
 	PrimaryAccount string
+}
+
+// limitedTo returns a copy of the user that owns only the given accounts.
+// The copy keeps the primary account only if it is among them.
+func (u *User) limitedTo(ids []string) *User {
+	v := *u
+	v.Accounts = slices.Compact(slices.Sorted(slices.Values(ids)))
+	if !v.HasAccount(v.PrimaryAccount) {
+		v.PrimaryAccount = ""
+	}
+	return &v
 }
 
 // HasAccount reports whether the user owns the account.
@@ -77,10 +98,11 @@ type Directory struct {
 
 // NewDirectory links users to the accounts they own and indexes
 // credentials.  It reports a bad directory rather than guessing: an
-// account with an unknown owner, two users holding the loopback
-// credential, or a primary account the user does not own.  A user who
-// owns exactly one account and names no primary gets that one as primary;
-// a user who owns several gets none unless one is named.
+// account with an unknown owner, the loopback credential or a tailscale
+// login held twice, or a primary account or credential account the user
+// does not own.  A user who owns exactly one account and names no primary
+// gets that one as primary; a user who owns several gets none unless one
+// is named.
 func NewDirectory(users map[string]*User, accounts map[string]*Account) (*Directory, error) {
 	d := &Directory{
 		Users:     users,
@@ -110,20 +132,32 @@ func NewDirectory(users map[string]*User, accounts map[string]*Account) (*Direct
 			return nil, fmt.Errorf("user %q names primaryAccount %q, which it does not own", id, u.PrimaryAccount)
 		}
 		for _, c := range u.Credentials {
+			as := u
+			if c.AccountIDs != nil {
+				if len(c.AccountIDs) == 0 {
+					return nil, fmt.Errorf("user %q has a credential with an empty accountIds list", id)
+				}
+				for _, a := range c.AccountIDs {
+					if !u.HasAccount(a) {
+						return nil, fmt.Errorf("user %q has a credential for account %q, which it does not own", id, a)
+					}
+				}
+				as = u.limitedTo(c.AccountIDs)
+			}
 			switch c.Type {
 			case CredLoopback:
-				if d.loopback != nil && d.loopback != u {
-					return nil, fmt.Errorf("users %q and %q both claim the loopback credential", d.loopback.ID, id)
+				if d.loopback != nil {
+					return nil, claimedTwice(d.loopback.ID, id, "the loopback credential")
 				}
-				d.loopback = u
+				d.loopback = as
 			case CredTailscale:
 				if c.Login == "" {
 					return nil, fmt.Errorf("user %q has a tailscale credential with no login", id)
 				}
-				if other, dup := d.tailscale[c.Login]; dup && other != u {
-					return nil, fmt.Errorf("users %q and %q both claim tailscale login %q", other.ID, id, c.Login)
+				if other, dup := d.tailscale[c.Login]; dup {
+					return nil, claimedTwice(other.ID, id, fmt.Sprintf("tailscale login %q", c.Login))
 				}
-				d.tailscale[c.Login] = u
+				d.tailscale[c.Login] = as
 			default:
 				return nil, fmt.Errorf("user %q has a credential of unknown type %q", id, c.Type)
 			}
@@ -132,11 +166,23 @@ func NewDirectory(users map[string]*User, accounts map[string]*Account) (*Direct
 	return d, nil
 }
 
+// claimedTwice reports a credential held twice.  Even one user may not
+// hold it twice, because each holding could limit it to a different
+// account.
+func claimedTwice(first, second, what string) error {
+	if first == second {
+		return fmt.Errorf("user %q claims %s twice", first, what)
+	}
+	return fmt.Errorf("users %q and %q both claim %s", first, second, what)
+}
+
 // LoopbackUser is the user that plain-listener requests act as, or nil if
-// no user holds the loopback credential.
+// no user holds the loopback credential.  If the credential names
+// accounts, the user returned owns only those.
 func (d *Directory) LoopbackUser() *User { return d.loopback }
 
 // TailscaleUser is the user holding the given Tailscale login, or nil.
+// If the credential names accounts, the user returned owns only those.
 func (d *Directory) TailscaleUser(login string) *User { return d.tailscale[login] }
 
 type ctxKey struct{}

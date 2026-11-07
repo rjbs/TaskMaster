@@ -28,7 +28,10 @@ The configuration file (JSON; see `taskmaster.example.json` and the
 * a **credential** is a way a user proves who they are.  There are two
   types.  `loopback` means "requests arriving on the plain `listen`
   address", which at most one user may hold.  `tailscale` names a
-  Tailscale login (like `rjbs`).
+  Tailscale login (like `rjbs`).  A credential may also give
+  `accountIds`, a non-empty list of the user's accounts; requests made
+  with that credential see only those accounts.  If the user's primary
+  account is not among them, they see no primary account.
 
 The Session object a user sees lists only the accounts they own, and a
 method call naming any other account fails with `accountNotFound`.

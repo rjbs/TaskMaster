@@ -13,7 +13,8 @@
 //	    "rjbs": {
 //	      "credentials": [
 //	        { "type": "loopback" },
-//	        { "type": "tailscale", "login": "rjbs@github" }
+//	        { "type": "tailscale", "login": "rjbs@github" },
+//	        { "type": "tailscale", "login": "rjbs-work@github", "accountIds": [ "work" ] }
 //	      ],
 //	      "primaryAccount": "rjbs"
 //	    }
@@ -25,7 +26,10 @@
 //	}
 //
 // Relative paths are resolved against the directory holding the file.  An
-// account's database defaults to <dataDir>/<account id>.sqlite.
+// account's database defaults to <dataDir>/<account id>.sqlite.  A
+// credential with accountIds sees only those accounts.  primaryAccount is
+// optional; a user who owns several accounts and names none has no
+// primary account.
 package config
 
 import (
@@ -87,8 +91,9 @@ type User struct {
 }
 
 type Credential struct {
-	Type  string `json:"type"`
-	Login string `json:"login"`
+	Type       string   `json:"type"`
+	Login      string   `json:"login"`
+	AccountIDs []string `json:"accountIds"`
 }
 
 type Account struct {
@@ -174,7 +179,7 @@ func Parse(raw []byte, baseDir string) (*Config, error) {
 		}
 		au := &auth.User{PrimaryAccount: u.PrimaryAccount}
 		for _, c := range u.Credentials {
-			au.Credentials = append(au.Credentials, auth.Credential{Type: c.Type, Login: c.Login})
+			au.Credentials = append(au.Credentials, auth.Credential{Type: c.Type, Login: c.Login, AccountIDs: c.AccountIDs})
 		}
 		users[id] = au
 	}

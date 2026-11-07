@@ -147,6 +147,31 @@ func TestSessionWithoutPrimaryAccount(t *testing.T) {
 	checkSession(t, m, m.dir.Users["rjbs"], "rjbs", "", []string{"rjbs", "work"})
 }
 
+func TestCredentialLimitedToAccount(t *testing.T) {
+	m := newMultiEnv(t,
+		map[string]*auth.User{"rjbs": {PrimaryAccount: "rjbs", Credentials: []auth.Credential{
+			{Type: auth.CredLoopback},
+			{Type: auth.CredTailscale, Login: "home@example", AccountIDs: []string{"side", "rjbs"}},
+			{Type: auth.CredTailscale, Login: "work@example", AccountIDs: []string{"work", "side"}},
+		}}},
+		map[string]*auth.Account{"rjbs": {Owner: "rjbs"}, "work": {Owner: "rjbs"}, "side": {Owner: "rjbs"}},
+	)
+	checkSession(t, m, m.dir.LoopbackUser(), "rjbs", "rjbs", []string{"rjbs", "side", "work"})
+	checkSession(t, m, m.dir.TailscaleUser("home@example"), "rjbs", "rjbs", []string{"rjbs", "side"})
+	checkSession(t, m, m.dir.TailscaleUser("work@example"), "rjbs", "", []string{"side", "work"})
+
+	work := m.as(m.dir.TailscaleUser("work@example")).URL
+	for _, acct := range []string{"work", "side"} {
+		if inv := callAs(t, work, "TaskList/get", obj{"accountId": acct}); inv.Name != "TaskList/get" {
+			t.Errorf("limited credential, permitted account %s: %v", acct, inv.Args)
+		}
+	}
+	inv := callAs(t, work, "TaskList/get", obj{"accountId": "rjbs"})
+	if inv.Name != "error" || inv.Args["type"] != jmap.ErrAccountNotFound {
+		t.Errorf("limited credential reached rjbs: %v", inv)
+	}
+}
+
 func TestMethodsRouteByAccount(t *testing.T) {
 	m := newMultiEnv(t, twoUsers, threeAccounts)
 	rjbs := m.as(m.dir.Users["rjbs"]).URL
