@@ -381,7 +381,7 @@ func TestTaskLifecycle(t *testing.T) {
 	}
 	listID := resps[0].Args["created"].(obj)["l"].(obj)["id"].(string)
 	created := resps[1].Args["created"].(obj)["k1"].(obj)
-	for _, p := range []string{"id", "uid", "created", "updated"} {
+	for _, p := range []string{"id", "version", "uid", "created", "updated"} {
 		if created[p] == nil {
 			t.Errorf("created response lacks %s: %v", p, created)
 		}
@@ -389,7 +389,7 @@ func TestTaskLifecycle(t *testing.T) {
 	taskID := created["id"].(string)
 
 	fetched := resps[2].Args["list"].([]any)[0].(obj)
-	if fetched["title"] != "Renew passport" || fetched["@type"] != "Task" || fetched["priority"] != 3.0 {
+	if fetched["title"] != "Renew passport" || fetched["@type"] != "Task" || fetched["version"] != "2.0" || fetched["priority"] != 3.0 {
 		t.Errorf("unexpected task: %v", fetched)
 	}
 	if !reflect.DeepEqual(fetched["taskListIds"], obj{listID: true}) {
@@ -475,6 +475,10 @@ func TestTaskValidation(t *testing.T) {
 	checkTaskInvalid(t, e, obj{"recurrenceRule": obj{"frequency": "weekly"}}, "start")
 	checkTaskInvalid(t, e, obj{"keywords": obj{"a": false}}, "keywords")
 	checkTaskInvalid(t, e, obj{"uid": ""}, "uid")
+	checkTaskInvalid(t, e, obj{"version": "1.0"}, "version")
+	checkTaskInvalid(t, e, obj{"version": "2.1"}, "version")
+	checkTaskInvalid(t, e, obj{"version": 2.0}, "version")
+	e.createTask(listID, obj{"title": "explicitly current", "version": "2.0"})
 
 	// Creating with a uid already in use is reported as alreadyExists with
 	// the id of the existing task, so a retried create can recover it.
@@ -490,6 +494,11 @@ func TestTaskValidation(t *testing.T) {
 	if typ, props := setErrorProps(t, resp, "notUpdated", other); typ != "invalidProperties" || !slices.Equal(props, []string{"uid"}) {
 		t.Errorf("duplicate uid on update: %v", resp["notUpdated"])
 	}
+	resp = e.call("Task/set", obj{"update": obj{other: obj{"version": nil}}})
+	if typ, props := setErrorProps(t, resp, "notUpdated", other); typ != "invalidProperties" || !slices.Equal(props, []string{"version"}) {
+		t.Errorf("removing version: %v", resp["notUpdated"])
+	}
+
 	// A different recurrenceId makes it a different task, not a duplicate.
 	e.createTask(listID, obj{"uid": "dup", "title": "instance", "start": "2026-10-04T09:00:00", "recurrenceId": "2026-10-04T09:00:00"})
 }

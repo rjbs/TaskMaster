@@ -77,6 +77,10 @@ func effectiveProgress(obj map[string]any) string {
 	return "needs-action"
 }
 
+// jscalendarVersion is the JSCalendar version every stored Task conforms
+// to, set by the server when a create omits it.
+const jscalendarVersion = "2.0"
+
 // validateTask checks the typed properties of a JSCalendar Task object.
 // Properties this server does not interpret are stored as given, including
 // ones it has never heard of: JSCalendar allows vendor extensions, and
@@ -95,6 +99,13 @@ func validateTask(obj map[string]any) *jmap.SetError {
 
 	if t, ok := obj["@type"]; ok && t != "Task" {
 		fail("@type", "must be \"Task\"")
+	}
+	// "1.0" is registered too, but means RFC 8984 semantics, which this
+	// server neither validates nor produces, and a later version may hold
+	// data we cannot check.  Storing either under our rules would misstate
+	// what the task contains.
+	if obj["version"] != jscalendarVersion {
+		fail("version", "must be \""+jscalendarVersion+"\"")
 	}
 	if uid, ok := obj["uid"].(string); !ok || uid == "" || len(uid) > 255 {
 		fail("uid", "must be a non-empty string of at most 255 octets")
@@ -611,6 +622,7 @@ func (s *Service) taskSet(c *jmap.Context, args map[string]any) (map[string]any,
 		created[cid] = map[string]any{
 			"id":      t.ID,
 			"@type":   "Task",
+			"version": t.Data["version"],
 			"uid":     t.UID,
 			"created": t.Data["created"],
 			"updated": t.Data["updated"],
@@ -791,6 +803,9 @@ func (s *Service) createTask(c *jmap.Context, tx *store.Tx, props map[string]any
 
 	if _, ok := obj["@type"]; !ok {
 		obj["@type"] = "Task"
+	}
+	if _, ok := obj["version"]; !ok {
+		obj["version"] = jscalendarVersion
 	}
 	if _, ok := obj["uid"]; !ok {
 		obj["uid"] = newID("")

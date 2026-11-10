@@ -172,6 +172,9 @@ behind the same authentication as the JMAP endpoints.  Set
   with an `alreadyExists` SetError carrying `existingId`, the shape RFC
   8620 defines for `/copy`.  A retried create whose first response was
   lost can recover its task from that.  The draft does not yet say this.
+* A Task's `version` is set to `"2.0"` on create if omitted, and any
+  other value is rejected.  JSCalendar also registers `"1.0"`, but that
+  means RFC 8984 semantics, which this server does not validate.
 * Text search uses SQLite FTS5 with the Porter stemmer.
 * The database schema is versioned with `PRAGMA user_version` and migrated
   on startup.
