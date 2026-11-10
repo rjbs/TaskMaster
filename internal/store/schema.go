@@ -92,4 +92,28 @@ ALTER TABLE tasks DROP COLUMN due_utc;
 	`
 ALTER TABLE tasklists ADD COLUMN vendor_props TEXT;
 `,
+	// JSCalendar bis reads a Task with no "version" as 1.0, which every
+	// Task this server stored before it began setting one is not.  Each
+	// changed Task gets its own modseq, as NextModSeq would give it, so
+	// Task/changes reports it to clients holding the old version.
+	// -- claude, 2026-11-10
+	`
+UPDATE tasks SET
+	data = json_set(data, '$.version', '2.0'),
+	updated_modseq = seq.n
+FROM (
+	SELECT id,
+		COALESCE((SELECT modseq FROM state WHERE type = 'Task'), 0)
+			+ ROW_NUMBER() OVER (ORDER BY id) AS n
+	FROM tasks
+	WHERE destroyed_modseq IS NULL AND json_type(data, '$.version') IS NULL
+) AS seq
+WHERE tasks.id = seq.id;
+
+INSERT INTO state (type, modseq)
+	SELECT 'Task', MAX(updated_modseq) FROM tasks
+	HAVING MAX(updated_modseq) IS NOT NULL
+	ON CONFLICT (type) DO UPDATE SET modseq = excluded.modseq
+	WHERE excluded.modseq > state.modseq;
+`,
 }
