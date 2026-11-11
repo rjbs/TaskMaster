@@ -215,6 +215,13 @@ func validateTask(obj map[string]any) *jmap.SetError {
 	if (has("timeZone") || showWithoutTime) && !has("start") && !has("due") {
 		fail("due", "at least one of start and due is required when timeZone or showWithoutTime is set")
 	}
+	// The instances inherit the base task's alerts, so a base task that
+	// fails here would mostly fail again through its overrides.
+	if id := unanchoredAlert(obj); id != "" {
+		fail("alerts", "alert "+id+" is relative to a time the task does not have")
+	} else if rid := unanchoredOverride(obj); rid != "" {
+		fail("recurrenceOverrides", "the instance at "+rid+" has an alert relative to a time it does not have")
+	}
 
 	if len(bad) > 0 {
 		return jmap.InvalidProperties(strings.Join(why, "; "), bad...)

@@ -503,6 +503,52 @@ func TestTaskValidation(t *testing.T) {
 	e.createTask(listID, obj{"uid": "dup", "title": "instance", "start": "2026-10-04T09:00:00", "recurrenceId": "2026-10-04T09:00:00"})
 }
 
+// offsetAlert is an alerts map holding one OffsetTrigger alert, relative
+// to relativeTo, or to the default if relativeTo is "".
+func offsetAlert(relativeTo string) obj {
+	trigger := obj{"@type": "OffsetTrigger", "offset": "-PT15M"}
+	if relativeTo != "" {
+		trigger["relativeTo"] = relativeTo
+	}
+	return obj{"a1": obj{"@type": "Alert", "trigger": trigger}}
+}
+
+func TestAlertAnchors(t *testing.T) {
+	e := newEnv(t)
+	listID := e.defaultListID()
+	const day = "2026-10-05T09:00:00"
+	absolute := obj{"a1": obj{"@type": "Alert", "trigger": obj{"@type": "AbsoluteTrigger", "when": "2026-10-05T08:00:00Z"}}}
+
+	checkTaskInvalid(t, e, obj{"alerts": offsetAlert("")}, "alerts")
+	checkTaskInvalid(t, e, obj{"alerts": offsetAlert("start"), "due": day}, "alerts")
+	checkTaskInvalid(t, e, obj{"alerts": offsetAlert("end"), "start": day}, "alerts")
+	e.createTask(listID, obj{"title": "default anchor", "alerts": offsetAlert(""), "start": day})
+	e.createTask(listID, obj{"title": "end anchor", "alerts": offsetAlert("end"), "due": day})
+	e.createTask(listID, obj{"title": "absolute", "alerts": absolute})
+
+	weekly := obj{"frequency": "weekly"}
+	const next = "2026-10-12T09:00:00"
+	checkTaskInvalid(t, e, obj{"start": day, "due": day, "recurrenceRule": weekly, "alerts": offsetAlert("end"),
+		"recurrenceOverrides": obj{next: obj{"due": nil}}}, "recurrenceOverrides")
+	checkTaskInvalid(t, e, obj{"start": day, "recurrenceRule": weekly,
+		"recurrenceOverrides": obj{next: obj{"alerts": offsetAlert("end")}}}, "recurrenceOverrides")
+	checkTaskInvalid(t, e, obj{"start": day, "recurrenceRule": weekly, "alerts": offsetAlert(""),
+		"recurrenceOverrides": obj{next: obj{"start": nil}}}, "recurrenceOverrides")
+	// An instance's start comes from its recurrence id, so it always has
+	// one unless the patch removes it; an excluded instance has no alerts.
+	e.createTask(listID, obj{"title": "weekly", "start": day, "recurrenceRule": weekly,
+		"recurrenceOverrides": obj{next: obj{"alerts": offsetAlert("start")}}})
+	e.createTask(listID, obj{"title": "skipped", "start": day, "due": day, "recurrenceRule": weekly, "alerts": offsetAlert("end"),
+		"recurrenceOverrides": obj{next: obj{"excluded": true}}})
+
+	// Removing the anchor later is caught too.
+	id := e.createTask(listID, obj{"title": "due soon", "alerts": offsetAlert("end"), "due": day})
+	resp := e.call("Task/set", obj{"update": obj{id: obj{"due": nil}}})
+	if typ, props := setErrorProps(t, resp, "notUpdated", id); typ != "invalidProperties" || !slices.Equal(props, []string{"alerts"}) {
+		t.Errorf("removing due under an end alert: %v", resp["notUpdated"])
+	}
+}
+
 // checkQuery runs Task/query in America/New_York with filter and sort and
 // checks the titles of the results, in order.
 func checkQuery(t *testing.T, e *env, filter any, sortBy []obj, wantTitles ...string) {
