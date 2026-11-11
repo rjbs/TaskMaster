@@ -42,6 +42,22 @@ func TestFTSMatch(t *testing.T) {
 	checkMatch(t, []string{"title"}, ``, ``, false)
 }
 
+func checkIndexedOther(t *testing.T, obj map[string]any, want string) {
+	t.Helper()
+	if _, _, other := ftsText(obj); other != want {
+		t.Errorf("ftsText(%v) other = %q, want %q", obj, other, want)
+	}
+}
+
+func TestFTSTextLocations(t *testing.T) {
+	checkIndexedOther(t, map[string]any{
+		"locations": map[string]any{"l1": map[string]any{"name": "Harbour", "description": "by the lighthouse"}},
+	}, "Harbour")
+	checkIndexedOther(t, map[string]any{
+		"virtualLocations": map[string]any{"v1": map[string]any{"name": "Standup", "description": "video call"}},
+	}, "Standup\nvideo call")
+}
+
 // checkSearchIndexRebuild stores a task whose index entry has the stale
 // "other" text, records the index as built at haveVersion, runs
 // EnsureSearchIndex, and checks the "other" text left in the index.
@@ -92,11 +108,14 @@ func checkSearchIndexRebuild(t *testing.T, haveVersion int, data map[string]any,
 }
 
 func TestSearchIndexRebuild(t *testing.T) {
-	milk := map[string]any{
-		"@type":    "Task",
-		"uid":      "u1",
-		"keywords": map[string]any{"dairy": true},
+	harbour := map[string]any{
+		"@type":     "Task",
+		"uid":       "u1",
+		"locations": map[string]any{"l1": map[string]any{"name": "Harbour", "description": "by the lighthouse"}},
 	}
-	checkSearchIndexRebuild(t, 0, milk, "stale", "dairy")
-	checkSearchIndexRebuild(t, searchIndexVersion, milk, "stale", "stale")
+	const old = "Harbour\nby the lighthouse"
+
+	checkSearchIndexRebuild(t, 0, harbour, old, "Harbour")
+	checkSearchIndexRebuild(t, 1, harbour, old, "Harbour")
+	checkSearchIndexRebuild(t, searchIndexVersion, harbour, old, old)
 }
