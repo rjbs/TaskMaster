@@ -549,6 +549,38 @@ func TestAlertAnchors(t *testing.T) {
 	}
 }
 
+func TestReservedProperties(t *testing.T) {
+	e := newEnv(t)
+	listID := e.defaultListID()
+
+	for _, prop := range []string{"localizations", "replyTo", "requestStatus", "excluded", "extra"} {
+		checkTaskInvalid(t, e, obj{prop: obj{}}, prop)
+	}
+	checkTaskInvalid(t, e, obj{"participants": obj{"p1": obj{"@type": "Participant", "name": "Ann", "sendTo": obj{}}}},
+		"participants/p1/sendTo")
+	checkTaskInvalid(t, e, obj{"locations": obj{"l1": obj{"@type": "Location", "name": "Harbour", "description": "by the lighthouse"}}},
+		"locations/l1/description")
+	checkTaskInvalid(t, e, obj{"virtualLocations": obj{"v1": obj{"@type": "VirtualLocation", "uri": "https://example.com/", "description": "call"}}},
+		"virtualLocations/v1/description")
+	checkTaskInvalid(t, e, obj{"links": obj{"a/b": obj{"@type": "Link", "href": "https://example.com/", "extra": 1}}},
+		"links/a~1b/extra")
+	checkTaskInvalid(t, e, obj{"localizations": obj{}, "replyTo": obj{}}, "localizations", "replyTo")
+
+	// Reserved names are only properties; as data they mean nothing.
+	e.createTask(listID, obj{"title": "keywords", "keywords": obj{"extra": true, "localizations": true}})
+
+	weekly := obj{"frequency": "weekly"}
+	const day, next = "2026-10-05T09:00:00", "2026-10-12T09:00:00"
+	checkTaskInvalid(t, e, obj{"start": day, "recurrenceRule": weekly,
+		"recurrenceOverrides": obj{next: obj{"localizations": obj{}}}}, "recurrenceOverrides")
+	checkTaskInvalid(t, e, obj{"start": day, "recurrenceRule": weekly,
+		"recurrenceOverrides": obj{next: obj{"excluded": true, "title": "skipped?"}}}, "recurrenceOverrides")
+	checkTaskInvalid(t, e, obj{"start": day, "recurrenceRule": obj{"frequency": "weekly", "extra": 1}},
+		"recurrenceRule/extra")
+	e.createTask(listID, obj{"title": "skips one", "start": day, "recurrenceRule": weekly,
+		"recurrenceOverrides": obj{next: obj{"excluded": true}}})
+}
+
 // checkQuery runs Task/query in America/New_York with filter and sort and
 // checks the titles of the results, in order.
 func checkQuery(t *testing.T, e *env, filter any, sortBy []obj, wantTitles ...string) {

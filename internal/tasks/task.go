@@ -159,7 +159,7 @@ func validateTask(obj map[string]any) *jmap.SetError {
 			}
 		}
 	}
-	for _, prop := range []string{"showWithoutTime", "useDefaultAlerts", "excluded"} {
+	for _, prop := range []string{"showWithoutTime", "useDefaultAlerts"} {
 		if v, ok := obj[prop]; ok {
 			if _, ok := v.(bool); !ok {
 				fail(prop, "must be a boolean")
@@ -184,8 +184,8 @@ func validateTask(obj map[string]any) *jmap.SetError {
 
 	for _, prop := range []string{
 		"relatedTo", "locations", "virtualLocations", "links", "keywords",
-		"categories", "recurrenceRule", "recurrenceOverrides", "replyTo",
-		"participants", "alerts", "localizations",
+		"categories", "recurrenceRule", "recurrenceOverrides",
+		"participants", "alerts",
 	} {
 		if v, ok := obj[prop]; ok {
 			if _, ok := v.(map[string]any); !ok {
@@ -221,6 +221,14 @@ func validateTask(obj map[string]any) *jmap.SetError {
 		fail("alerts", "alert "+id+" is relative to a time the task does not have")
 	} else if rid := unanchoredOverride(obj); rid != "" {
 		fail("recurrenceOverrides", "the instance at "+rid+" has an alert relative to a time it does not have")
+	}
+	// As with alerts, instances inherit the base task's properties.
+	if paths := reservedPaths(obj); len(paths) > 0 {
+		for _, path := range paths {
+			fail(path, "is reserved by JSCalendar")
+		}
+	} else if rid := reservedOverride(obj); rid != "" {
+		fail("recurrenceOverrides", "the instance at "+rid+" sets a property reserved by JSCalendar")
 	}
 
 	if len(bad) > 0 {
