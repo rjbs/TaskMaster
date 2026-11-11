@@ -535,6 +535,26 @@ func checkQueryInZone(t *testing.T, e *env, tz string, filter any, sortBy []obj,
 	}
 }
 
+// checkIDSort runs Task/query sorted on id in the given direction and
+// asserts it returns wantCount ids, in that order.  Ids are server-chosen,
+// so the expected order is derived from the ids themselves.
+func checkIDSort(t *testing.T, e *env, ascending bool, wantCount int) {
+	t.Helper()
+	resp := e.call("Task/query", obj{"sort": []obj{{"property": "id", "isAscending": ascending}}})
+	var ids []string
+	for _, id := range resp["ids"].([]any) {
+		ids = append(ids, id.(string))
+	}
+	want := slices.Clone(ids)
+	slices.Sort(want)
+	if !ascending {
+		slices.Reverse(want)
+	}
+	if len(ids) != wantCount || !slices.Equal(ids, want) {
+		t.Errorf("sort on id (ascending=%v): got %v", ascending, ids)
+	}
+}
+
 func TestTaskQuery(t *testing.T) {
 	e := newEnv(t)
 	home := e.defaultListID()
@@ -599,6 +619,12 @@ func TestTaskQuery(t *testing.T) {
 
 	if typ := e.callError("Task/query", obj{"sort": []obj{{"property": "title"}}}); typ != "unsupportedSort" {
 		t.Errorf("sort on title: %s", typ)
+	}
+	checkIDSort(t, e, true, 6)
+	checkIDSort(t, e, false, 6)
+
+	if typ := e.callError("Task/query", obj{"sort": []obj{{"property": "recurrenceId"}}}); typ != "unsupportedSort" {
+		t.Errorf("sort on recurrenceId: %s", typ)
 	}
 	if typ := e.callError("Task/query", obj{"filter": obj{"color": "red"}}); typ != "unsupportedFilter" {
 		t.Errorf("filter on color: %s", typ)
