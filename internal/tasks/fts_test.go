@@ -55,7 +55,7 @@ func TestFTSTextLocations(t *testing.T) {
 	}, "Harbour")
 	checkIndexedOther(t, map[string]any{
 		"virtualLocations": map[string]any{"v1": map[string]any{"name": "Standup", "description": "video call"}},
-	}, "Standup\nvideo call")
+	}, "Standup")
 }
 
 // checkSearchIndexRebuild stores a task whose index entry has the stale

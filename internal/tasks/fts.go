@@ -15,7 +15,8 @@ import (
 //
 //  1. the initial indexing
 //  2. location descriptions are no longer indexed
-const searchIndexVersion = 2
+//  3. nor are virtual location descriptions
+const searchIndexVersion = 3
 
 // searchTerms splits a text filter value into terms following the Filtering
 // section of the spec: a run in matching single or double quotes is one
@@ -106,10 +107,10 @@ func ftsText(obj map[string]any) (title, description, other string) {
 			}
 		}
 	}
-	// Location "description" is reserved in JSCalendar bis, so the draft's
-	// text filter matches a location by name alone.
+	// "description" is reserved on both kinds of location in JSCalendar
+	// bis, so the text filter matches a location by name alone.
 	eachValue("locations", func(m map[string]any) { addStr(&o, m["name"]) })
-	eachValue("virtualLocations", func(m map[string]any) { addStr(&o, m["name"]); addStr(&o, m["description"]) })
+	eachValue("virtualLocations", func(m map[string]any) { addStr(&o, m["name"]) })
 	eachValue("participants", func(m map[string]any) { addStr(&o, m["name"]); addStr(&o, m["email"]) })
 	eachValue("links", func(m map[string]any) { addStr(&o, m["title"]) })
 	for _, prop := range []string{"keywords", "categories"} {
