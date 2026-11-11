@@ -116,4 +116,13 @@ INSERT INTO state (type, modseq)
 	ON CONFLICT (type) DO UPDATE SET modseq = excluded.modseq
 	WHERE excluded.modseq > state.modseq;
 `,
+	// Versions of indexes whose contents are computed in Go, so that the
+	// code can tell when they were built by older rules and rebuild them.
+	// -- claude, 2026-11-10
+	`
+CREATE TABLE index_versions (
+	name    TEXT PRIMARY KEY,
+	version INTEGER NOT NULL
+);
+`,
 }

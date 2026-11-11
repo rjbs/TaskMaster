@@ -1,9 +1,20 @@
 package tasks
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"unicode"
+
+	"github.com/rjbs/taskmaster/internal/store"
 )
+
+// searchIndexVersion identifies what ftsText puts in the index.  Bump it
+// whenever that changes, and EnsureSearchIndex will rebuild the entries of
+// tasks written under the old rules the next time the server starts.
+//
+//  1. the initial indexing
+const searchIndexVersion = 1
 
 // searchTerms splits a text filter value into terms following the Filtering
 // section of the spec: a run in matching single or double quotes is one
@@ -107,4 +118,72 @@ func ftsText(obj map[string]any) (title, description, other string) {
 	}
 
 	return strings.Join(t, "\n"), strings.Join(d, "\n"), strings.Join(o, "\n")
+}
+
+// writeSearchEntry replaces the full-text index entry of one task.
+func writeSearchEntry(tx *store.Tx, id string, obj map[string]any) error {
+	if _, err := tx.Exec(`DELETE FROM tasks_fts WHERE task_id = ?`, id); err != nil {
+		return err
+	}
+	title, description, other := ftsText(obj)
+	_, err := tx.Exec(`INSERT INTO tasks_fts (task_id, title, description, other) VALUES (?, ?, ?, ?)`,
+		id, title, description, other)
+	return err
+}
+
+// EnsureSearchIndex rebuilds the full-text index if it was built by a
+// version of ftsText older than this one.  A schema migration cannot do
+// this, because the indexed text is computed here, not in SQL.
+func (s *Service) EnsureSearchIndex(ctx context.Context) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var have int
+	err = tx.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM index_versions WHERE name = 'tasks_fts'`).Scan(&have)
+	if err != nil {
+		return err
+	}
+	if have >= searchIndexVersion {
+		return nil
+	}
+
+	rows, err := tx.Query(`SELECT id, data FROM tasks WHERE destroyed_modseq IS NULL`)
+	if err != nil {
+		return err
+	}
+	data := map[string]string{}
+	for rows.Next() {
+		var id, d string
+		if err := rows.Scan(&id, &d); err != nil {
+			rows.Close()
+			return err
+		}
+		data[id] = d
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(`DELETE FROM tasks_fts`); err != nil {
+		return err
+	}
+	for id, d := range data {
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(d), &obj); err != nil {
+			return err
+		}
+		if err := writeSearchEntry(tx, id, obj); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(`INSERT INTO index_versions (name, version) VALUES ('tasks_fts', ?)
+		ON CONFLICT (name) DO UPDATE SET version = excluded.version`, searchIndexVersion)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }

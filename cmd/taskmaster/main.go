@@ -105,6 +105,9 @@ func run(logger *slog.Logger, configPath string) error {
 		if err := svc.EnsureDefaultTaskList(ctx); err != nil {
 			return fmt.Errorf("creating default task list for account %q: %w", id, err)
 		}
+		if err := svc.EnsureSearchIndex(ctx); err != nil {
+			return fmt.Errorf("rebuilding search index for account %q: %w", id, err)
+		}
 		db.OnCommit(broker.Publisher(id))
 		reg.Add(svc)
 		if fresh {

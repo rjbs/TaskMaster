@@ -362,13 +362,7 @@ func (s *Service) writeTask(tx *store.Tx, t *task, isNew bool) error {
 		}
 	}
 
-	if _, err := tx.Exec(`DELETE FROM tasks_fts WHERE task_id = ?`, t.ID); err != nil {
-		return err
-	}
-	title, description, other := ftsText(t.Data)
-	_, err = tx.Exec(`INSERT INTO tasks_fts (task_id, title, description, other) VALUES (?, ?, ?, ?)`,
-		t.ID, title, description, other)
-	return err
+	return writeSearchEntry(tx, t.ID, t.Data)
 }
 
 func destroyTask(tx *store.Tx, id string) error {
