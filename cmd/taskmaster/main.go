@@ -17,9 +17,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rjbs/taskmaster/internal/auth"
+	"github.com/rjbs/gizmo/auth"
+	"github.com/rjbs/gizmo/jmap"
+	"github.com/rjbs/gizmo/push"
+
 	"github.com/rjbs/taskmaster/internal/config"
-	"github.com/rjbs/taskmaster/internal/jmap"
 	"github.com/rjbs/taskmaster/internal/server"
 	"github.com/rjbs/taskmaster/internal/store"
 	"github.com/rjbs/taskmaster/internal/tailnet"
@@ -64,7 +66,7 @@ func main() {
 // newToken prints a fresh bearer token, for the client, and the credential
 // that accepts it, for the configuration file.
 func newToken() error {
-	token, err := auth.NewToken()
+	token, err := auth.NewToken(config.TokenPrefix)
 	if err != nil {
 		return err
 	}
@@ -86,7 +88,7 @@ func run(logger *slog.Logger, configPath string) error {
 	defer stop()
 
 	reg := tasks.NewRegistry()
-	broker := server.NewBroker()
+	broker := push.NewBroker()
 	ids := make([]string, 0, len(cfg.Directory.Accounts))
 	for id := range cfg.Directory.Accounts {
 		ids = append(ids, id)
@@ -94,9 +96,10 @@ func run(logger *slog.Logger, configPath string) error {
 	sort.Strings(ids)
 	for _, id := range ids {
 		acct := cfg.Directory.Accounts[id]
-		_, statErr := os.Stat(acct.Path)
+		path := cfg.Paths[id]
+		_, statErr := os.Stat(path)
 		fresh := errors.Is(statErr, fs.ErrNotExist)
-		db, err := store.Open(acct.Path)
+		db, err := store.Open(path)
 		if err != nil {
 			return fmt.Errorf("opening database for account %q: %w", id, err)
 		}
@@ -111,9 +114,9 @@ func run(logger *slog.Logger, configPath string) error {
 		db.OnCommit(broker.Publisher(id))
 		reg.Add(svc)
 		if fresh {
-			logger.Warn("account database did not exist; created an empty one", "id", id, "owner", acct.Owner, "db", acct.Path)
+			logger.Warn("account database did not exist; created an empty one", "id", id, "owner", acct.Owner, "db", path)
 		} else {
-			logger.Info("account", "id", id, "owner", acct.Owner, "db", acct.Path)
+			logger.Info("account", "id", id, "owner", acct.Owner, "db", path)
 		}
 	}
 

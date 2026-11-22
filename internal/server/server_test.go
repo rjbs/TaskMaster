@@ -13,8 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rjbs/taskmaster/internal/auth"
-	"github.com/rjbs/taskmaster/internal/jmap"
+	"github.com/rjbs/gizmo/auth"
+	"github.com/rjbs/gizmo/jmap"
+	"github.com/rjbs/gizmo/push"
 	"github.com/rjbs/taskmaster/internal/store"
 	"github.com/rjbs/taskmaster/internal/tasks"
 
@@ -29,7 +30,7 @@ type obj = map[string]any
 type env struct {
 	t      *testing.T
 	ts     *httptest.Server
-	broker *Broker
+	broker *push.Broker
 }
 
 func newEnv(t *testing.T) *env {
@@ -55,7 +56,7 @@ func newEnvWith(t *testing.T, page http.Handler) *env {
 	reg.Add(svc)
 	proc := jmap.NewProcessor()
 	reg.Register(proc)
-	broker := NewBroker()
+	broker := push.NewBroker()
 	db.OnCommit(broker.Publisher(account))
 
 	dir, err := auth.NewDirectory(
@@ -71,32 +72,41 @@ func newEnvWith(t *testing.T, page http.Handler) *env {
 	return &env{t: t, ts: ts, broker: broker}
 }
 
+// invocation is a method call or response, with its arguments decoded.
+type invocation struct {
+	Name   string
+	Args   obj
+	CallID string
+}
+
 // request posts method calls and returns the raw method responses.
-func (e *env) request(calls ...jmap.Invocation) []jmap.Invocation {
+func (e *env) request(calls ...invocation) []invocation {
 	e.t.Helper()
-	body, _ := json.Marshal(jmap.Request{
-		Using:       []string{jmap.CoreCapability, tasks.Capability},
-		MethodCalls: calls,
+	triples := make([][]any, len(calls))
+	for i, c := range calls {
+		triples[i] = []any{c.Name, c.Args, c.CallID}
+	}
+	body, _ := json.Marshal(obj{
+		"using":       []string{jmap.CoreCapability, tasks.Capability},
+		"methodCalls": triples,
 	})
-	resp, err := http.Post(e.ts.URL+"/jmap", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(e.ts.URL+"/jmap/api", "application/json", bytes.NewReader(body))
 	if err != nil {
 		e.t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		e.t.Fatalf("POST /jmap: status %d", resp.StatusCode)
+		e.t.Fatalf("POST /jmap/api: status %d", resp.StatusCode)
 	}
-	// Decode with plain encoding/json rather than through jmap.Response,
-	// whose decoder keeps numbers as json.Number; tests want float64.
 	var out struct {
 		MethodResponses [][3]json.RawMessage `json:"methodResponses"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		e.t.Fatal(err)
 	}
-	var invs []jmap.Invocation
+	var invs []invocation
 	for _, r := range out.MethodResponses {
-		var inv jmap.Invocation
+		var inv invocation
 		json.Unmarshal(r[0], &inv.Name)
 		json.Unmarshal(r[1], &inv.Args)
 		json.Unmarshal(r[2], &inv.CallID)
@@ -116,7 +126,7 @@ func withAccount(args obj) obj {
 // call runs one method and fails the test if it returns an error.
 func (e *env) call(name string, args obj) obj {
 	e.t.Helper()
-	resps := e.request(jmap.Invocation{Name: name, Args: withAccount(args), CallID: "c"})
+	resps := e.request(invocation{Name: name, Args: withAccount(args), CallID: "c"})
 	if resps[0].Name == "error" {
 		e.t.Fatalf("%s returned error: %v", name, resps[0].Args)
 	}
@@ -126,7 +136,7 @@ func (e *env) call(name string, args obj) obj {
 // callError runs one method and returns the error type it produced.
 func (e *env) callError(name string, args obj) string {
 	e.t.Helper()
-	resps := e.request(jmap.Invocation{Name: name, Args: withAccount(args), CallID: "c"})
+	resps := e.request(invocation{Name: name, Args: withAccount(args), CallID: "c"})
 	if resps[0].Name != "error" {
 		e.t.Fatalf("%s succeeded; expected an error", name)
 	}
@@ -233,7 +243,7 @@ func TestSession(t *testing.T) {
 	if caps["mayCreateTaskList"] != true {
 		t.Error("mayCreateTaskList should be true")
 	}
-	if sess["apiUrl"] != e.ts.URL+"/jmap" {
+	if sess["apiUrl"] != e.ts.URL+"/jmap/api" {
 		t.Errorf("apiUrl = %v", sess["apiUrl"])
 	}
 }
@@ -357,10 +367,10 @@ func TestTaskListValidation(t *testing.T) {
 func TestTaskLifecycle(t *testing.T) {
 	e := newEnv(t)
 	resps := e.request(
-		jmap.Invocation{Name: "TaskList/set", CallID: "0", Args: withAccount(obj{
+		invocation{Name: "TaskList/set", CallID: "0", Args: withAccount(obj{
 			"create": obj{"l": obj{"name": "Errands"}},
 		})},
-		jmap.Invocation{Name: "Task/set", CallID: "1", Args: withAccount(obj{
+		invocation{Name: "Task/set", CallID: "1", Args: withAccount(obj{
 			"create": obj{"k1": obj{
 				"taskListIds": obj{"#l": true},
 				"title":       "Renew passport",
@@ -370,7 +380,7 @@ func TestTaskLifecycle(t *testing.T) {
 				"keywords":    obj{"travel": true},
 			}},
 		})},
-		jmap.Invocation{Name: "Task/get", CallID: "2", Args: withAccount(obj{
+		invocation{Name: "Task/get", CallID: "2", Args: withAccount(obj{
 			"ids": []string{"#k1"},
 		})},
 	)
@@ -786,7 +796,7 @@ func TestNotificationsAreEmpty(t *testing.T) {
 func TestRequestErrors(t *testing.T) {
 	e := newEnv(t)
 	post := func(body string) (int, string) {
-		resp, err := http.Post(e.ts.URL+"/jmap", "application/json", bytes.NewReader([]byte(body)))
+		resp, err := http.Post(e.ts.URL+"/jmap/api", "application/json", bytes.NewReader([]byte(body)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -802,15 +812,19 @@ func TestRequestErrors(t *testing.T) {
 	if status, typ := post(`{"using": []}`); status != 400 || typ != jmap.ReqErrNotRequest {
 		t.Errorf("not a request: %d %s", status, typ)
 	}
-	if status, typ := post(fmt.Sprintf(`{"using": [%q], "methodCalls": []}`, tasks.Capability)); status != 400 || typ != jmap.ReqErrUnknownCapability {
-		t.Errorf("missing core: %d %s", status, typ)
+	if status, typ := post(`{"using": ["urn:example:nope"], "methodCalls": []}`); status != 400 || typ != jmap.ReqErrUnknownCapability {
+		t.Errorf("unknown capability: %d %s", status, typ)
+	}
+	// RFC 8620 does not oblige a request to use the core capability.
+	if status, _ := post(fmt.Sprintf(`{"using": [%q], "methodCalls": []}`, tasks.Capability)); status != 200 {
+		t.Errorf("a request not using core: %d", status)
 	}
 
-	resps := e.request(jmap.Invocation{Name: "Task/get", CallID: "x", Args: obj{"accountId": "nobody"}})
+	resps := e.request(invocation{Name: "Task/get", CallID: "x", Args: obj{"accountId": "nobody"}})
 	if resps[0].Name != "error" || resps[0].Args["type"] != "accountNotFound" {
 		t.Errorf("wrong account: %v", resps[0])
 	}
-	resps = e.request(jmap.Invocation{Name: "Task/copy", CallID: "x", Args: withAccount(obj{})})
+	resps = e.request(invocation{Name: "Task/copy", CallID: "x", Args: withAccount(obj{})})
 	if resps[0].Name != "error" || resps[0].Args["type"] != "unknownMethod" {
 		t.Errorf("Task/copy: %v", resps[0])
 	}
@@ -829,9 +843,15 @@ func TestEventSource(t *testing.T) {
 
 	done := make(chan string, 1)
 	go func() {
+		// The stream opens with a comment, which is not an event.
 		buf := make([]byte, 4096)
-		n, _ := resp.Body.Read(buf)
-		done <- string(buf[:n])
+		for {
+			n, err := resp.Body.Read(buf)
+			if bytes.Contains(buf[:n], []byte("data: ")) || err != nil {
+				done <- string(buf[:n])
+				return
+			}
+		}
 	}()
 
 	// Give the subscriber a moment to register before we change anything.
@@ -1073,20 +1093,20 @@ func TestResultReferences(t *testing.T) {
 	e.createTask(listID, obj{"title": "done", "progress": "completed"})
 
 	resps := e.request(
-		jmap.Invocation{Name: "Task/query", CallID: "1", Args: withAccount(obj{
+		invocation{Name: "Task/query", CallID: "1", Args: withAccount(obj{
 			"filter": obj{"progress": []string{"needs-action", "in-process"}},
 			"sort":   []obj{{"property": "due"}},
 		})},
-		jmap.Invocation{Name: "Task/get", CallID: "2", Args: withAccount(obj{
+		invocation{Name: "Task/get", CallID: "2", Args: withAccount(obj{
 			"#ids": obj{"resultOf": "1", "name": "Task/query", "path": "/ids"},
 		})},
-		jmap.Invocation{Name: "Task/get", CallID: "3", Args: withAccount(obj{
+		invocation{Name: "Task/get", CallID: "3", Args: withAccount(obj{
 			"#ids": obj{"resultOf": "1", "name": "Task/query", "path": "/nope"},
 		})},
-		jmap.Invocation{Name: "Task/get", CallID: "4", Args: withAccount(obj{
+		invocation{Name: "Task/get", CallID: "4", Args: withAccount(obj{
 			"#ids": obj{"resultOf": "9", "name": "Task/query", "path": "/ids"},
 		})},
-		jmap.Invocation{Name: "Task/get", CallID: "5", Args: withAccount(obj{
+		invocation{Name: "Task/get", CallID: "5", Args: withAccount(obj{
 			"#ids": obj{"resultOf": "2", "name": "Task/get", "path": "/list/*/id"},
 		})},
 	)

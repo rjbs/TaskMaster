@@ -5,7 +5,7 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/rjbs/taskmaster/internal/jmap"
+	"github.com/rjbs/gizmo/jmap"
 )
 
 // unanchoredAlert returns the id of an alert in obj with an OffsetTrigger

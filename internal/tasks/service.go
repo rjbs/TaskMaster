@@ -19,8 +19,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/rjbs/taskmaster/internal/auth"
-	"github.com/rjbs/taskmaster/internal/jmap"
+	"github.com/rjbs/gizmo/auth"
+	"github.com/rjbs/gizmo/jmap"
 	"github.com/rjbs/taskmaster/internal/store"
 )
 
@@ -58,21 +58,25 @@ func New(db *store.DB, cfg Config) *Service {
 // AccountID is the id of the account this service serves.
 func (s *Service) AccountID() string { return s.cfg.AccountID }
 
+// handler implements one JMAP method for one account.  Its arguments are
+// decoded JSON, with numbers as json.Number.
+type handler func(c *jmap.Call, args map[string]any) (map[string]any, error)
+
 // methods maps each JMAP method to the Service method implementing it.
-var methods = map[string]func(*Service) jmap.Handler{
-	"TaskList/get":                  func(s *Service) jmap.Handler { return s.taskListGet },
-	"TaskList/changes":              func(s *Service) jmap.Handler { return s.taskListChanges },
-	"TaskList/set":                  func(s *Service) jmap.Handler { return s.taskListSet },
-	"Task/get":                      func(s *Service) jmap.Handler { return s.taskGet },
-	"Task/changes":                  func(s *Service) jmap.Handler { return s.taskChanges },
-	"Task/set":                      func(s *Service) jmap.Handler { return s.taskSet },
-	"Task/query":                    func(s *Service) jmap.Handler { return s.taskQuery },
-	"Task/queryChanges":             func(s *Service) jmap.Handler { return s.taskQueryChanges },
-	"TaskNotification/get":          func(s *Service) jmap.Handler { return s.notificationGet },
-	"TaskNotification/changes":      func(s *Service) jmap.Handler { return s.notificationChanges },
-	"TaskNotification/set":          func(s *Service) jmap.Handler { return s.notificationSet },
-	"TaskNotification/query":        func(s *Service) jmap.Handler { return s.notificationQuery },
-	"TaskNotification/queryChanges": func(s *Service) jmap.Handler { return s.notificationQueryChanges },
+var methods = map[string]func(*Service) handler{
+	"TaskList/get":                  func(s *Service) handler { return s.taskListGet },
+	"TaskList/changes":              func(s *Service) handler { return s.taskListChanges },
+	"TaskList/set":                  func(s *Service) handler { return s.taskListSet },
+	"Task/get":                      func(s *Service) handler { return s.taskGet },
+	"Task/changes":                  func(s *Service) handler { return s.taskChanges },
+	"Task/set":                      func(s *Service) handler { return s.taskSet },
+	"Task/query":                    func(s *Service) handler { return s.taskQuery },
+	"Task/queryChanges":             func(s *Service) handler { return s.taskQueryChanges },
+	"TaskNotification/get":          func(s *Service) handler { return s.notificationGet },
+	"TaskNotification/changes":      func(s *Service) handler { return s.notificationChanges },
+	"TaskNotification/set":          func(s *Service) handler { return s.notificationSet },
+	"TaskNotification/query":        func(s *Service) handler { return s.notificationQuery },
+	"TaskNotification/queryChanges": func(s *Service) handler { return s.notificationQueryChanges },
 }
 
 // Registry holds the Service for every account the server has.
@@ -99,28 +103,24 @@ func (r *Registry) Get(accountID string) *Service {
 // account; otherwise the call fails with accountNotFound, which is what RFC
 // 8620 prescribes for an account the user cannot see.
 func (r *Registry) Register(p *jmap.Processor) {
+	find := func(id string) (*Service, bool) {
+		svc, ok := r.services[id]
+		return svc, ok
+	}
 	for name, pick := range methods {
-		p.Register(name, Capability, r.route(pick))
+		p.Register(name, Capability, auth.ForAccount(find, func(svc *Service, c *jmap.Call, raw json.RawMessage) (any, error) {
+			args, err := jmap.DecodeObject(raw)
+			if err != nil {
+				return nil, jmap.ArgError("%v", err)
+			}
+			return pick(svc)(c, args)
+		}))
 	}
 }
 
-func (r *Registry) route(pick func(*Service) jmap.Handler) jmap.Handler {
-	return func(c *jmap.Context, args map[string]any) (map[string]any, error) {
-		v, ok := args["accountId"]
-		if !ok {
-			return nil, jmap.ArgError("accountId is required")
-		}
-		id, ok := v.(string)
-		if !ok {
-			return nil, jmap.ArgError("accountId must be a string")
-		}
-		user, _ := auth.UserFrom(c.Context())
-		svc := r.services[id]
-		if svc == nil || user == nil || !user.HasAccount(id) {
-			return nil, &jmap.MethodError{Type: jmap.ErrAccountNotFound}
-		}
-		return pick(svc)(c, args)
-	}
+// Capabilities is the account's accountCapabilities object.
+func (s *Service) Capabilities() map[string]any {
+	return map[string]any{Capability: s.AccountCapabilities()}
 }
 
 // AccountCapabilities is the value of the tasks capability in the account's
@@ -158,7 +158,7 @@ func (s *Service) EnsureDefaultTaskList(ctx context.Context) error {
 	return tx.Commit()
 }
 
-func (s *Service) begin(c *jmap.Context) (*store.Tx, error) {
+func (s *Service) begin(c *jmap.Call) (*store.Tx, error) {
 	return s.db.Begin(c.Context())
 }
 

@@ -7,7 +7,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rjbs/taskmaster/internal/jmap"
+	"github.com/rjbs/gizmo/jmap"
 	"github.com/rjbs/taskmaster/internal/store"
 )
 
@@ -425,7 +425,7 @@ func existingTaskWithUID(tx *store.Tx, uid string, recurrenceID *string, exceptI
 
 // extractTaskListIDs validates and removes "taskListIds" from obj, resolving
 // creation references and checking that every list exists.
-func extractTaskListIDs(c *jmap.Context, tx *store.Tx, obj map[string]any) ([]string, *jmap.SetError, error) {
+func extractTaskListIDs(c *jmap.Call, tx *store.Tx, obj map[string]any) ([]string, *jmap.SetError, error) {
 	bad := func(msg string) ([]string, *jmap.SetError, error) {
 		return nil, jmap.InvalidProperties("taskListIds: "+msg, "taskListIds"), nil
 	}
@@ -457,7 +457,7 @@ func extractTaskListIDs(c *jmap.Context, tx *store.Tx, obj map[string]any) ([]st
 	return slices.Compact(lists), nil, nil
 }
 
-func (s *Service) taskGet(c *jmap.Context, args map[string]any) (map[string]any, error) {
+func (s *Service) taskGet(c *jmap.Call, args map[string]any) (map[string]any, error) {
 	ids, hasIDs, err := argStringList(args, "ids")
 	if err != nil {
 		return nil, err
@@ -559,7 +559,7 @@ func (s *Service) windowOverrides(obj map[string]any, after, before *string) {
 	obj["recurrenceOverrides"] = kept
 }
 
-func (s *Service) taskChanges(c *jmap.Context, args map[string]any) (map[string]any, error) {
+func (s *Service) taskChanges(c *jmap.Call, args map[string]any) (map[string]any, error) {
 	tx, err := s.begin(c)
 	if err != nil {
 		return nil, err
@@ -568,7 +568,7 @@ func (s *Service) taskChanges(c *jmap.Context, args map[string]any) (map[string]
 	return s.changes(tx, "tasks", typeTask, args)
 }
 
-func (s *Service) taskSet(c *jmap.Context, args map[string]any) (map[string]any, error) {
+func (s *Service) taskSet(c *jmap.Call, args map[string]any) (map[string]any, error) {
 	create, _, err := argObject(args, "create")
 	if err != nil {
 		return nil, err
@@ -626,7 +626,7 @@ func (s *Service) taskSet(c *jmap.Context, args map[string]any) (map[string]any,
 			notCreated[cid] = serr
 			continue
 		}
-		c.CreatedIDs[cid] = t.ID
+		c.SetCreatedID(cid, t.ID)
 		createdTasks[cid] = t
 		created[cid] = map[string]any{
 			"id":      t.ID,
@@ -696,7 +696,7 @@ func (s *Service) taskSet(c *jmap.Context, args map[string]any) (map[string]any,
 		if derr := eraseTask(tx, t.ID); derr != nil {
 			return nil, derr
 		}
-		delete(c.CreatedIDs, cid)
+		c.ForgetCreatedID(cid)
 		delete(created, cid)
 		notCreated[cid] = privacyConflictError()
 	}
@@ -793,7 +793,7 @@ func eraseTask(tx *store.Tx, id string) error {
 	return nil
 }
 
-func (s *Service) createTask(c *jmap.Context, tx *store.Tx, props map[string]any) (*task, *jmap.SetError, error) {
+func (s *Service) createTask(c *jmap.Call, tx *store.Tx, props map[string]any) (*task, *jmap.SetError, error) {
 	obj := make(map[string]any, len(props))
 	for k, v := range props {
 		if v != nil {
@@ -850,7 +850,7 @@ func (s *Service) createTask(c *jmap.Context, tx *store.Tx, props map[string]any
 
 // updateTask applies patch to the task and returns the new and previous
 // versions.
-func (s *Service) updateTask(c *jmap.Context, tx *store.Tx, id string, patch map[string]any) (*task, *task, *jmap.SetError, error) {
+func (s *Service) updateTask(c *jmap.Call, tx *store.Tx, id string, patch map[string]any) (*task, *task, *jmap.SetError, error) {
 	prev, err := loadTask(tx, id)
 	if err != nil {
 		return nil, nil, nil, err

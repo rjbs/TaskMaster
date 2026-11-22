@@ -12,8 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rjbs/taskmaster/internal/auth"
-	"github.com/rjbs/taskmaster/internal/jmap"
+	"github.com/rjbs/gizmo/auth"
+	"github.com/rjbs/gizmo/jmap"
+	"github.com/rjbs/gizmo/push"
 	"github.com/rjbs/taskmaster/internal/store"
 	"github.com/rjbs/taskmaster/internal/tasks"
 )
@@ -24,7 +25,7 @@ type multiEnv struct {
 	t      *testing.T
 	dir    *auth.Directory
 	srv    *Server
-	broker *Broker
+	broker *push.Broker
 }
 
 func newMultiEnv(t *testing.T, users map[string]*auth.User, accounts map[string]*auth.Account) *multiEnv {
@@ -33,9 +34,10 @@ func newMultiEnv(t *testing.T, users map[string]*auth.User, accounts map[string]
 	if err != nil {
 		t.Fatal(err)
 	}
+	dir.TokenPrefix = "taskmaster-"
 	loc, _ := time.LoadLocation("America/New_York")
 	reg := tasks.NewRegistry()
-	broker := NewBroker()
+	broker := push.NewBroker()
 	for id := range accounts {
 		db, err := store.Open(":memory:")
 		if err != nil {
@@ -88,10 +90,10 @@ func sessionAccounts(sess obj) []string {
 	return ids
 }
 
-func callAs(t *testing.T, url, method string, args obj) jmap.Invocation {
+func callAs(t *testing.T, url, method string, args obj) invocation {
 	t.Helper()
 	e := &env{t: t, ts: &httptest.Server{URL: url}}
-	return e.request(jmap.Invocation{Name: method, Args: args, CallID: "c"})[0]
+	return e.request(invocation{Name: method, Args: args, CallID: "c"})[0]
 }
 
 var twoUsers = map[string]*auth.User{
@@ -340,9 +342,9 @@ func checkAuthorized(t *testing.T, url, authz string, wantStatus int, wantUser s
 }
 
 func TestBearerMiddleware(t *testing.T) {
-	workToken, _ := auth.NewToken()
-	guestToken, _ := auth.NewToken()
-	unknownToken, _ := auth.NewToken()
+	workToken, _ := auth.NewToken("taskmaster-")
+	guestToken, _ := auth.NewToken("taskmaster-")
+	unknownToken, _ := auth.NewToken("taskmaster-")
 	m := newMultiEnv(t,
 		map[string]*auth.User{
 			"rjbs": {Credentials: []auth.Credential{

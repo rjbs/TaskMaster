@@ -10,7 +10,7 @@ needs: a few accounts, each with its own database, and no sharing.
     cp taskmaster.example.json taskmaster.json   # and edit
     ./taskmaster -config taskmaster.json
 
-The Session object is at `/.well-known/jmap`, the API at `/jmap`, and the
+The Session object is at `/.well-known/jmap`, the API at `/jmap/api`, and the
 push event source at `/jmap/eventsource`.  On first start, each account
 gets a default TaskList named "Tasks".
 

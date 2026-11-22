@@ -42,7 +42,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/rjbs/taskmaster/internal/auth"
+	"github.com/rjbs/gizmo/auth"
 )
 
 type File struct {
@@ -104,11 +104,17 @@ type Account struct {
 	Path  string `json:"path"`
 }
 
+// TokenPrefix begins every bearer token TaskMaster issues or accepts.
+const TokenPrefix = "taskmaster-"
+
 // Config is a loaded, validated configuration.
 type Config struct {
 	File
 	Location  *time.Location
 	Directory *auth.Directory
+
+	// Paths gives the SQLite file of each account, by account id.
+	Paths map[string]string
 }
 
 // Account ids become file names, and users ids appear in the Session, so
@@ -186,6 +192,7 @@ func Parse(raw []byte, baseDir string) (*Config, error) {
 		users[id] = au
 	}
 	accounts := map[string]*auth.Account{}
+	cfg.Paths = map[string]string{}
 	for id, a := range cfg.Accounts {
 		if !idPattern.MatchString(id) {
 			return nil, fmt.Errorf("account id %q is not allowed", id)
@@ -198,7 +205,8 @@ func Parse(raw []byte, baseDir string) (*Config, error) {
 		if name == "" {
 			name = id
 		}
-		accounts[id] = &auth.Account{Name: name, Owner: a.Owner, Path: resolve(path)}
+		accounts[id] = &auth.Account{Name: name, Owner: a.Owner}
+		cfg.Paths[id] = resolve(path)
 	}
 	if len(accounts) == 0 {
 		return nil, fmt.Errorf("at least one account is required")
@@ -207,6 +215,7 @@ func Parse(raw []byte, baseDir string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	dir.TokenPrefix = TokenPrefix
 	cfg.Directory = dir
 	return cfg, nil
 }

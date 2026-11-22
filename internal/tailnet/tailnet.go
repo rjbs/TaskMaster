@@ -14,7 +14,7 @@ import (
 	"tailscale.com/client/local"
 	"tailscale.com/tsnet"
 
-	"github.com/rjbs/taskmaster/internal/auth"
+	"github.com/rjbs/gizmo/auth"
 )
 
 type Node struct {

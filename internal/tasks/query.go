@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rjbs/taskmaster/internal/jmap"
+	"github.com/rjbs/gizmo/jmap"
 	"github.com/rjbs/taskmaster/internal/store"
 )
 
@@ -48,7 +48,7 @@ type comparator struct {
 
 type predicate func(*queryRow) bool
 
-func (s *Service) taskQuery(c *jmap.Context, args map[string]any) (map[string]any, error) {
+func (s *Service) taskQuery(c *jmap.Call, args map[string]any) (map[string]any, error) {
 	expand, err := argBool(args, "expandRecurrences", false)
 	if err != nil {
 		return nil, err
@@ -250,7 +250,7 @@ func nullInt(ni sql.NullInt64) *int64 {
 
 // compileFilter turns a Filter (operator tree or single condition) into a
 // predicate over query rows.
-func compileFilter(c *jmap.Context, tx *store.Tx, f any, loc *time.Location) (predicate, *jmap.MethodError) {
+func compileFilter(c *jmap.Call, tx *store.Tx, f any, loc *time.Location) (predicate, *jmap.MethodError) {
 	switch v := f.(type) {
 	case nil:
 		return func(*queryRow) bool { return true }, nil
@@ -264,7 +264,7 @@ func compileFilter(c *jmap.Context, tx *store.Tx, f any, loc *time.Location) (pr
 	}
 }
 
-func compileOperator(c *jmap.Context, tx *store.Tx, op string, conditions any, loc *time.Location) (predicate, *jmap.MethodError) {
+func compileOperator(c *jmap.Call, tx *store.Tx, op string, conditions any, loc *time.Location) (predicate, *jmap.MethodError) {
 	list, ok := conditions.([]any)
 	if !ok {
 		return nil, &jmap.MethodError{Type: jmap.ErrUnsupportedFilter, Description: "conditions must be an array"}
@@ -303,7 +303,7 @@ func compileOperator(c *jmap.Context, tx *store.Tx, op string, conditions any, l
 	return nil, &jmap.MethodError{Type: jmap.ErrUnsupportedFilter, Description: "unknown operator " + op}
 }
 
-func compileCondition(c *jmap.Context, tx *store.Tx, cond map[string]any, loc *time.Location) (predicate, *jmap.MethodError) {
+func compileCondition(c *jmap.Call, tx *store.Tx, cond map[string]any, loc *time.Location) (predicate, *jmap.MethodError) {
 	var parts []predicate
 	invalid := func(key, msg string) (predicate, *jmap.MethodError) {
 		return nil, jmap.ArgError("filter %s %s", key, msg)
@@ -492,6 +492,6 @@ func nullLastCompare[T any](a, b *T, compare func(T, T) int, direction func(int)
 	return direction(compare(*a, *b))
 }
 
-func (s *Service) taskQueryChanges(c *jmap.Context, args map[string]any) (map[string]any, error) {
+func (s *Service) taskQueryChanges(c *jmap.Call, args map[string]any) (map[string]any, error) {
 	return nil, &jmap.MethodError{Type: jmap.ErrCannotCalculateChanges}
 }

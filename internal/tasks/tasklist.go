@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rjbs/taskmaster/internal/jmap"
+	"github.com/rjbs/gizmo/jmap"
 	"github.com/rjbs/taskmaster/internal/store"
 )
 
@@ -369,7 +369,7 @@ func updateTaskListRow(tx *store.Tx, l *taskList) error {
 	return err
 }
 
-func (s *Service) taskListGet(c *jmap.Context, args map[string]any) (map[string]any, error) {
+func (s *Service) taskListGet(c *jmap.Call, args map[string]any) (map[string]any, error) {
 	ids, hasIDs, err := argStringList(args, "ids")
 	if err != nil {
 		return nil, err
@@ -432,7 +432,7 @@ func (s *Service) taskListGet(c *jmap.Context, args map[string]any) (map[string]
 	}, nil
 }
 
-func (s *Service) taskListChanges(c *jmap.Context, args map[string]any) (map[string]any, error) {
+func (s *Service) taskListChanges(c *jmap.Call, args map[string]any) (map[string]any, error) {
 	tx, err := s.begin(c)
 	if err != nil {
 		return nil, err
@@ -441,7 +441,7 @@ func (s *Service) taskListChanges(c *jmap.Context, args map[string]any) (map[str
 	return s.changes(tx, "tasklists", typeTaskList, args)
 }
 
-func (s *Service) taskListSet(c *jmap.Context, args map[string]any) (map[string]any, error) {
+func (s *Service) taskListSet(c *jmap.Call, args map[string]any) (map[string]any, error) {
 	create, _, err := argObject(args, "create")
 	if err != nil {
 		return nil, err
@@ -502,7 +502,7 @@ func (s *Service) taskListSet(c *jmap.Context, args map[string]any) (map[string]
 			notCreated[cid] = serr
 			continue
 		}
-		c.CreatedIDs[cid] = l.ID
+		c.SetCreatedID(cid, l.ID)
 		created[cid] = map[string]any{
 			"id":        l.ID,
 			"isDefault": false,

@@ -26,7 +26,7 @@ func TestParse(t *testing.T) {
 		"accounts": { "rjbs": { "owner": "rjbs" } }
 	}`, "")
 	if cfg != nil {
-		if got := cfg.Directory.Accounts["rjbs"].Path; got != "/base/rjbs.sqlite" {
+		if got := cfg.Paths["rjbs"]; got != "/base/rjbs.sqlite" {
 			t.Errorf("default path: got %q", got)
 		}
 		if got := cfg.Directory.Users["rjbs"].PrimaryAccount; got != "rjbs" {
@@ -61,10 +61,10 @@ func TestParse(t *testing.T) {
 		}
 	}`, "")
 	if cfg != nil {
-		if got := cfg.Directory.Accounts["rjbs"].Path; got != "/base/data/rjbs.sqlite" {
+		if got := cfg.Paths["rjbs"]; got != "/base/data/rjbs.sqlite" {
 			t.Errorf("dataDir path: got %q", got)
 		}
-		if got := cfg.Directory.Accounts["work"].Path; got != "/elsewhere/work.sqlite" {
+		if got := cfg.Paths["work"]; got != "/elsewhere/work.sqlite" {
 			t.Errorf("explicit path: got %q", got)
 		}
 		if got := cfg.Directory.Users["rjbs"].Accounts; len(got) != 2 {

@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	github.com/google/uuid v1.6.0
+	github.com/rjbs/gizmo v0.0.0-20261122235908-024bab6dd3ff
 	modernc.org/sqlite v1.60.1
 	tailscale.com v1.104.4
 )

@@ -1,6 +1,6 @@
-// Package server exposes the JMAP service over HTTP: the Session resource,
-// the API endpoint, an event source for push, and placeholder blob
-// endpoints that the Session object is obliged to advertise.
+// Package server puts TaskMaster's HTTP service together: Gizmo's JMAP
+// server over the accounts' task services, and, if wanted, the server's own
+// web client at the root.
 //
 // Every request must already carry an authenticated user in its context,
 // put there by one of the auth package's listeners; the Server itself
@@ -8,24 +8,16 @@
 package server
 
 import (
-	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
-	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"strconv"
-	"strings"
-	"time"
 
-	"github.com/rjbs/taskmaster/internal/auth"
-	"github.com/rjbs/taskmaster/internal/jmap"
+	"github.com/rjbs/gizmo/auth"
+	"github.com/rjbs/gizmo/httpd"
+	"github.com/rjbs/gizmo/jmap"
+	"github.com/rjbs/gizmo/push"
+
 	"github.com/rjbs/taskmaster/internal/tasks"
 )
-
-const maxSizeRequest = 10_000_000
 
 type Config struct {
 	// BaseURL, if set, is used to build the absolute URLs in the Session
@@ -35,7 +27,7 @@ type Config struct {
 	Directory *auth.Directory
 	Accounts  *tasks.Registry
 	Processor *jmap.Processor
-	Broker    *Broker
+	Broker    *push.Broker
 
 	// Page, if set, is served at the root as the server's own web client.
 	Page   http.Handler
@@ -43,7 +35,6 @@ type Config struct {
 }
 
 type Server struct {
-	cfg Config
 	mux *http.ServeMux
 }
 
@@ -51,14 +42,27 @@ func New(cfg Config) *Server {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	s := &Server{cfg: cfg, mux: http.NewServeMux()}
-	cfg.Processor.SessionState = s.sessionState
-	s.mux.HandleFunc("GET /.well-known/jmap", s.handleSession)
-	s.mux.HandleFunc("GET /jmap/session", s.handleSession)
-	s.mux.HandleFunc("POST /jmap", s.handleAPI)
-	s.mux.HandleFunc("GET /jmap/eventsource", s.handleEventSource)
-	s.mux.HandleFunc("GET /jmap/download/{accountId}/{blobId}/{name}", s.handleNoBlobs)
-	s.mux.HandleFunc("POST /jmap/upload/{accountId}/", s.handleNoBlobs)
+	cfg.Processor.Logger = cfg.Logger
+	j := httpd.New(httpd.Config{
+		BaseURL:   cfg.BaseURL,
+		Processor: cfg.Processor,
+		Directory: cfg.Directory,
+		Account: func(id string) httpd.Account {
+			// A nil *tasks.Service in the interface would not be a
+			// nil interface, so the missing case is spelled out.
+			if svc := cfg.Accounts.Get(id); svc != nil {
+				return svc
+			}
+			return nil
+		},
+		Broker:       cfg.Broker,
+		Capabilities: map[string]any{tasks.Capability: map[string]any{}},
+		Collations:   []string{"i;ascii-casemap", "i;unicode-casemap"},
+		Logger:       cfg.Logger,
+	})
+
+	s := &Server{mux: http.NewServeMux()}
+	s.mux.Handle("/", j)
 	if cfg.Page != nil {
 		s.mux.Handle("GET /{$}", cfg.Page)
 		s.mux.Handle("GET /index.html", cfg.Page)
@@ -72,260 +76,4 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mux.ServeHTTP(w, r)
-}
-
-func (s *Server) baseURL(r *http.Request) string {
-	if s.cfg.BaseURL != "" {
-		return strings.TrimSuffix(s.cfg.BaseURL, "/")
-	}
-	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-		scheme = "https"
-	}
-	return scheme + "://" + r.Host
-}
-
-// user returns the request's authenticated user, which ServeHTTP has
-// already insisted on.
-func user(ctx context.Context) *auth.User {
-	u, _ := auth.UserFrom(ctx)
-	return u
-}
-
-// accounts builds the Session's accounts object for a user.
-func (s *Server) accounts(u *auth.User) map[string]any {
-	out := map[string]any{}
-	for _, id := range u.Accounts {
-		svc := s.cfg.Accounts.Get(id)
-		if svc == nil {
-			continue
-		}
-		out[id] = map[string]any{
-			"name":       s.cfg.Directory.Accounts[id].Name,
-			"isPersonal": true,
-			"isReadOnly": false,
-			"accountCapabilities": map[string]any{
-				tasks.Capability: svc.AccountCapabilities(),
-			},
-		}
-	}
-	return out
-}
-
-// session builds the Session object (RFC 8620 §2) for the request's user.
-func (s *Server) session(r *http.Request) map[string]any {
-	base := s.baseURL(r)
-	u := user(r.Context())
-	primary := map[string]any{}
-	if u.PrimaryAccount != "" {
-		primary[tasks.Capability] = u.PrimaryAccount
-	}
-	return map[string]any{
-		"capabilities": map[string]any{
-			jmap.CoreCapability: map[string]any{
-				"maxSizeUpload":         0,
-				"maxConcurrentUpload":   1,
-				"maxSizeRequest":        maxSizeRequest,
-				"maxConcurrentRequests": 4,
-				"maxCallsInRequest":     s.cfg.Processor.MaxCalls,
-				"maxObjectsInGet":       1000,
-				"maxObjectsInSet":       1000,
-				"collationAlgorithms":   []string{"i;ascii-casemap", "i;unicode-casemap"},
-			},
-			tasks.Capability: map[string]any{},
-		},
-		"accounts":        s.accounts(u),
-		"primaryAccounts": primary,
-		"username":        u.ID,
-		"apiUrl":          base + "/jmap",
-		"downloadUrl":     base + "/jmap/download/{accountId}/{blobId}/{name}?accept={type}",
-		"uploadUrl":       base + "/jmap/upload/{accountId}/",
-		"eventSourceUrl":  base + "/jmap/eventsource?types={types}&closeafter={closeafter}&ping={ping}",
-		"state":           s.sessionState(r.Context()),
-	}
-}
-
-// sessionState only has to change when the session changes.  Apart from
-// the URLs, which vary per request but not per session, the variable
-// content is the user's accounts and their capabilities, so a digest of
-// those is an honest state string.
-func (s *Server) sessionState(ctx context.Context) string {
-	u := user(ctx)
-	digest, _ := json.Marshal([]any{u.ID, u.PrimaryAccount, s.accounts(u)})
-	sum := sha256.Sum256(digest)
-	return hex.EncodeToString(sum[:8])
-}
-
-func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.session(r))
-}
-
-func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSizeRequest))
-	if err != nil {
-		s.requestError(w, &jmap.RequestError{Type: jmap.ReqErrLimit, Status: 400, Limit: "maxSizeRequest", Detail: err.Error()})
-		return
-	}
-	var req jmap.Request
-	if err := json.Unmarshal(body, &req); err != nil {
-		typ := jmap.ReqErrNotRequest
-		if !json.Valid(body) {
-			typ = jmap.ReqErrNotJSON
-		}
-		s.requestError(w, &jmap.RequestError{Type: typ, Status: 400, Detail: err.Error()})
-		return
-	}
-	if req.MethodCalls == nil {
-		s.requestError(w, &jmap.RequestError{Type: jmap.ReqErrNotRequest, Status: 400, Detail: "methodCalls is required"})
-		return
-	}
-
-	resp, rerr := s.cfg.Processor.Process(r.Context(), &req)
-	if rerr != nil {
-		s.requestError(w, rerr)
-		return
-	}
-	for _, inv := range resp.MethodResponses {
-		if inv.Name == "error" {
-			s.cfg.Logger.Info("method error", "callId", inv.CallID, "error", inv.Args)
-		}
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-func (s *Server) requestError(w http.ResponseWriter, e *jmap.RequestError) {
-	w.Header().Set("Content-Type", "application/problem+json")
-	w.WriteHeader(e.Status)
-	json.NewEncoder(w).Encode(e)
-}
-
-func (s *Server) handleNoBlobs(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "this server does not store blobs", http.StatusNotFound)
-}
-
-// currentStates reads the state of every type in every one of the user's
-// accounts, in the shape of a StateChange's "changed" member.
-func (s *Server) currentStates(ctx context.Context, u *auth.User) (Changes, error) {
-	out := Changes{}
-	for _, id := range u.Accounts {
-		svc := s.cfg.Accounts.Get(id)
-		if svc == nil {
-			continue
-		}
-		states, err := svc.States(ctx)
-		if err != nil {
-			return nil, err
-		}
-		out[id] = states
-	}
-	return out, nil
-}
-
-// handleEventSource implements the push event source (RFC 8620 §7.3).
-func (s *Server) handleEventSource(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-	u := user(r.Context())
-	q := r.URL.Query()
-	wanted := map[string]bool{}
-	for _, t := range strings.Split(q.Get("types"), ",") {
-		if t = strings.TrimSpace(t); t != "" {
-			wanted[t] = true
-		}
-	}
-	all := len(wanted) == 0 || wanted["*"]
-	closeAfterState := q.Get("closeafter") == "state"
-	pingSeconds, _ := strconv.Atoi(q.Get("ping"))
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-	flusher.Flush()
-
-	sub := s.cfg.Broker.subscribe(u.Accounts)
-	defer s.cfg.Broker.unsubscribe(sub)
-
-	eventID := 0
-	sendPing := func() {
-		fmt.Fprintf(w, "event: ping\ndata: {\"interval\": %d}\n\n", pingSeconds)
-		flusher.Flush()
-	}
-	sendState := func(changed Changes) bool {
-		for acct, types := range changed {
-			if !all {
-				for typ := range types {
-					if !wanted[typ] {
-						delete(types, typ)
-					}
-				}
-			}
-			if len(types) == 0 {
-				delete(changed, acct)
-			}
-		}
-		if len(changed) == 0 {
-			return false
-		}
-		eventID++
-		data, _ := json.Marshal(map[string]any{
-			"@type":   "StateChange",
-			"changed": changed,
-		})
-		fmt.Fprintf(w, "event: state\nid: %d\ndata: %s\n\n", eventID, data)
-		flusher.Flush()
-		return true
-	}
-
-	// Send something at once: some browsers (Firefox) do not fire the
-	// EventSource "open" event until the first byte of the body arrives.
-	// The current state is the most useful first byte, since a client
-	// that fell behind while disconnected learns so immediately, and it
-	// also covers any change committed between this request arriving
-	// and the subscription above.  A closeafter=state client wants to be
-	// held until a real change, so it gets a ping instead.
-	// -- claude, 2026-10-02
-	if closeAfterState {
-		if pingSeconds > 0 {
-			sendPing()
-		}
-	} else {
-		states, err := s.currentStates(r.Context(), u)
-		if err != nil {
-			s.cfg.Logger.Error("reading states for event source", "error", err)
-			return
-		}
-		sendState(states)
-	}
-
-	var ping <-chan time.Time
-	if pingSeconds > 0 {
-		ticker := time.NewTicker(time.Duration(pingSeconds) * time.Second)
-		defer ticker.Stop()
-		ping = ticker.C
-	}
-
-	for {
-		select {
-		case <-r.Context().Done():
-			return
-		case <-ping:
-			sendPing()
-		case <-sub.notify:
-			if sendState(sub.take()) && closeAfterState {
-				return
-			}
-		}
-	}
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	enc.Encode(v)
 }
