@@ -77,6 +77,10 @@ func effectiveProgress(obj map[string]any) string {
 	return "needs-action"
 }
 
+// jscalendarVersion is the JSCalendar version every stored Task conforms
+// to, set by the server when a create omits it.
+const jscalendarVersion = "2.0"
+
 // validateTask checks the typed properties of a JSCalendar Task object.
 // Properties this server does not interpret are stored as given, including
 // ones it has never heard of: JSCalendar allows vendor extensions, and
@@ -95,6 +99,13 @@ func validateTask(obj map[string]any) *jmap.SetError {
 
 	if t, ok := obj["@type"]; ok && t != "Task" {
 		fail("@type", "must be \"Task\"")
+	}
+	// "1.0" is registered too, but means RFC 8984 semantics, which this
+	// server neither validates nor produces, and a later version may hold
+	// data we cannot check.  Storing either under our rules would misstate
+	// what the task contains.
+	if obj["version"] != jscalendarVersion {
+		fail("version", "must be \""+jscalendarVersion+"\"")
 	}
 	if uid, ok := obj["uid"].(string); !ok || uid == "" || len(uid) > 255 {
 		fail("uid", "must be a non-empty string of at most 255 octets")
@@ -148,7 +159,7 @@ func validateTask(obj map[string]any) *jmap.SetError {
 			}
 		}
 	}
-	for _, prop := range []string{"showWithoutTime", "useDefaultAlerts", "excluded"} {
+	for _, prop := range []string{"showWithoutTime", "useDefaultAlerts"} {
 		if v, ok := obj[prop]; ok {
 			if _, ok := v.(bool); !ok {
 				fail(prop, "must be a boolean")
@@ -173,8 +184,8 @@ func validateTask(obj map[string]any) *jmap.SetError {
 
 	for _, prop := range []string{
 		"relatedTo", "locations", "virtualLocations", "links", "keywords",
-		"categories", "recurrenceRule", "recurrenceOverrides", "replyTo",
-		"participants", "alerts", "localizations",
+		"categories", "recurrenceRule", "recurrenceOverrides",
+		"participants", "alerts",
 	} {
 		if v, ok := obj[prop]; ok {
 			if _, ok := v.(map[string]any); !ok {
@@ -203,6 +214,21 @@ func validateTask(obj map[string]any) *jmap.SetError {
 	showWithoutTime, _ := obj["showWithoutTime"].(bool)
 	if (has("timeZone") || showWithoutTime) && !has("start") && !has("due") {
 		fail("due", "at least one of start and due is required when timeZone or showWithoutTime is set")
+	}
+	// The instances inherit the base task's alerts, so a base task that
+	// fails here would mostly fail again through its overrides.
+	if id := unanchoredAlert(obj); id != "" {
+		fail("alerts", "alert "+id+" is relative to a time the task does not have")
+	} else if rid := unanchoredOverride(obj); rid != "" {
+		fail("recurrenceOverrides", "the instance at "+rid+" has an alert relative to a time it does not have")
+	}
+	// As with alerts, instances inherit the base task's properties.
+	if paths := reservedPaths(obj); len(paths) > 0 {
+		for _, path := range paths {
+			fail(path, "is reserved by JSCalendar")
+		}
+	} else if rid := reservedOverride(obj); rid != "" {
+		fail("recurrenceOverrides", "the instance at "+rid+" sets a property reserved by JSCalendar")
 	}
 
 	if len(bad) > 0 {
@@ -351,13 +377,7 @@ func (s *Service) writeTask(tx *store.Tx, t *task, isNew bool) error {
 		}
 	}
 
-	if _, err := tx.Exec(`DELETE FROM tasks_fts WHERE task_id = ?`, t.ID); err != nil {
-		return err
-	}
-	title, description, other := ftsText(t.Data)
-	_, err = tx.Exec(`INSERT INTO tasks_fts (task_id, title, description, other) VALUES (?, ?, ?, ?)`,
-		t.ID, title, description, other)
-	return err
+	return writeSearchEntry(tx, t.ID, t.Data)
 }
 
 func destroyTask(tx *store.Tx, id string) error {
@@ -611,6 +631,7 @@ func (s *Service) taskSet(c *jmap.Context, args map[string]any) (map[string]any,
 		created[cid] = map[string]any{
 			"id":      t.ID,
 			"@type":   "Task",
+			"version": t.Data["version"],
 			"uid":     t.UID,
 			"created": t.Data["created"],
 			"updated": t.Data["updated"],
@@ -791,6 +812,9 @@ func (s *Service) createTask(c *jmap.Context, tx *store.Tx, props map[string]any
 
 	if _, ok := obj["@type"]; !ok {
 		obj["@type"] = "Task"
+	}
+	if _, ok := obj["version"]; !ok {
+		obj["version"] = jscalendarVersion
 	}
 	if _, ok := obj["uid"]; !ok {
 		obj["uid"] = newID("")

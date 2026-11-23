@@ -6,6 +6,12 @@ import (
 	"strings"
 )
 
+// EscapeToken escapes s for use as one JSON Pointer token (RFC 6901 §3).
+func EscapeToken(s string) string {
+	s = strings.ReplaceAll(s, "~", "~0")
+	return strings.ReplaceAll(s, "/", "~1")
+}
+
 // UnescapeToken reverses JSON Pointer token escaping (RFC 6901 §4).
 func UnescapeToken(s string) string {
 	s = strings.ReplaceAll(s, "~1", "/")

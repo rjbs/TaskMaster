@@ -25,7 +25,6 @@ const ErrCannotCalculateOccurrences = "cannotCalculateOccurrences"
 // queryRow is the sortable, filterable summary of one task.
 type queryRow struct {
 	id, uid                        string
-	recurrenceID                   *string
 	startLocal, dueLocal, timeZone *string
 	progress                       string
 	progressRank                   int64
@@ -37,7 +36,7 @@ type queryRow struct {
 
 // sortProperties lists the Comparator properties Task/query accepts.
 var sortProperties = map[string]bool{
-	"due": true, "start": true, "uid": true, "recurrenceId": true,
+	"id": true, "uid": true, "due": true, "start": true,
 	"priority": true, "progress": true, "percentComplete": true,
 	"created": true, "updated": true,
 }
@@ -162,7 +161,7 @@ func (s *Service) taskQuery(c *jmap.Context, args map[string]any) (map[string]an
 // loadQueryRows reads every live task's summary and resolves its start and
 // due instants, using loc for tasks that have no zone of their own.
 func loadQueryRows(tx *store.Tx, loc *time.Location) ([]*queryRow, error) {
-	rows, err := tx.Query(`SELECT id, uid, recurrence_id, start_local, due_local, time_zone, progress,
+	rows, err := tx.Query(`SELECT id, uid, start_local, due_local, time_zone, progress,
 		progress_rank, percent_complete, priority, created, updated
 		FROM tasks WHERE destroyed_modseq IS NULL`)
 	if err != nil {
@@ -201,13 +200,12 @@ func loadQueryRows(tx *store.Tx, loc *time.Location) ([]*queryRow, error) {
 	var out []*queryRow
 	for rows.Next() {
 		r := &queryRow{lists: map[string]bool{}}
-		var rid, startLocal, dueLocal, tz sql.NullString
+		var startLocal, dueLocal, tz sql.NullString
 		var pct, pri sql.NullInt64
-		if err := rows.Scan(&r.id, &r.uid, &rid, &startLocal, &dueLocal, &tz, &r.progress,
+		if err := rows.Scan(&r.id, &r.uid, &startLocal, &dueLocal, &tz, &r.progress,
 			&r.progressRank, &pct, &pri, &r.created, &r.updated); err != nil {
 			return nil, err
 		}
-		r.recurrenceID = nullString(rid)
 		r.startLocal, r.dueLocal, r.timeZone = nullString(startLocal), nullString(dueLocal), nullString(tz)
 		r.percentComplete, r.priority = nullInt(pct), nullInt(pri)
 		z := zone(r.timeZone)
@@ -457,14 +455,14 @@ func (c comparator) compare(a, b *queryRow) int {
 		return nullLastCompare(a.dueInstant, b.dueInstant, time.Time.Compare, c.direction)
 	case "start":
 		return nullLastCompare(a.startInstant, b.startInstant, time.Time.Compare, c.direction)
-	case "recurrenceId":
-		return nullLastCompare(a.recurrenceID, b.recurrenceID, strings.Compare, c.direction)
 	case "priority":
 		return nullLastCompare(a.priority, b.priority, cmp.Compare[int64], c.direction)
 	case "percentComplete":
 		return nullLastCompare(a.percentComplete, b.percentComplete, cmp.Compare[int64], c.direction)
 	case "progress":
 		return c.direction(cmp.Compare(a.progressRank, b.progressRank))
+	case "id":
+		return c.direction(strings.Compare(a.id, b.id))
 	case "uid":
 		return c.direction(strings.Compare(a.uid, b.uid))
 	case "created":

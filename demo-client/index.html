@@ -10,6 +10,7 @@
     --blue:  #1356a2;
     --black: #000;
     --grey:  #888;
+    --amber: #c77700;
   }
 
   * { box-sizing: border-box; }
@@ -88,7 +89,7 @@
 
   .tasks li {
     display: grid;
-    grid-template-columns: auto 1fr auto auto;
+    grid-template-columns: auto 1fr auto auto auto;
     gap: 10px;
     align-items: center;
     padding: 6px 0;
@@ -97,6 +98,8 @@
   .tasks li .name { cursor: text; min-width: 0; overflow-wrap: anywhere; }
   .tasks li .name input { width: 100%; }
   .tasks li.done .name { text-decoration: line-through; color: var(--grey); }
+  .tasks li.failed .name { text-decoration: line-through; color: var(--grey); }
+  .tasks li.failed button.fail { visibility: hidden; }
   .tasks li .due { font-size: 12px; color: var(--grey); white-space: nowrap; }
   .tasks li.overdue .due { color: var(--red); }
   .tasks li .in .dot { width: 8px; height: 8px; margin: 0 4px 0 6px; }
@@ -122,6 +125,8 @@
   button { cursor: pointer; }
   button.quiet { border: 0; padding: 0 6px; color: var(--grey); font-size: 18px; line-height: 1; }
   button.quiet:hover { color: var(--red); }
+  button.quiet svg { display: block; width: 14px; height: 14px; }
+  button.quiet.fail:hover { color: var(--amber); }
 
   input[type=checkbox] {
     appearance: none;
@@ -131,6 +136,10 @@
     vertical-align: middle;
   }
   input[type=checkbox]:checked { background: var(--blue); }
+  .tasks li.failed input[type=checkbox] {
+    border-color: var(--red);
+    background: linear-gradient(to top right, transparent 44%, var(--red) 44% 56%, transparent 56%);
+  }
 
   .dot {
     display: inline-block;
@@ -205,6 +214,25 @@ function el (tag, attrs = {}, ...children) {
   }
   node.append(...children);
   return node;
+}
+
+// Row icons are drawn as SVG rather than taken from a font: the obvious
+// characters (🗑 especially) get rendered as color emoji on macOS, at a weight
+// nothing else on the row can match. -- claude, 2026-11-08
+const ICONS = {
+  failed: '<circle cx="8" cy="8" r="6"/><path d="M3.8 12.2l8.4-8.4"/>',
+  trash:  '<path d="M2 4h12M6 4V2h4v2M3.5 4l1 10h7l1-10M6.5 7v5M9.5 7v5"/>',
+};
+
+function icon (paths) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.5');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.innerHTML = paths;
+  return svg;
 }
 
 // A list's color as a small solid circle.  A list with no color gets a hollow
@@ -394,10 +422,12 @@ async function createTask (title, due) {
   await loadTasks();
 }
 
-async function setDone (task, done) {
-  const patch = done
-    ? { progress: 'completed',    percentComplete: 100  }
-    : { progress: 'needs-action', percentComplete: null };
+// A failed task keeps whatever percentComplete it had; how far it got before
+// failing is still true. -- claude, 2026-11-08
+async function setProgress (task, progress) {
+  const patch = progress === 'completed'    ? { progress, percentComplete: 100  }
+              : progress === 'needs-action' ? { progress, percentComplete: null }
+              :                               { progress };
   await set('Task', { update: { [task.id]: patch } });
   await loadTasks();
 }
@@ -484,7 +514,7 @@ function formatDue (task) {
 }
 
 function isOverdue (task) {
-  if (!task.due || task.progress === 'completed') return false;
+  if (!task.due || task.progress === 'completed' || task.progress === 'failed') return false;
   const when = new Date(task.due);
   if (task.showWithoutTime) when.setHours(23, 59, 59, 999);
   return when < new Date();
@@ -496,7 +526,8 @@ function renderTasks () {
   $('empty').hidden = S.tasks.length > 0;
 
   for (const task of S.tasks) {
-    const done = task.progress === 'completed';
+    const done   = task.progress === 'completed';
+    const failed = task.progress === 'failed';
 
     const name = el('span', { class: 'name', title: 'Click to edit' }, task.title ?? '(untitled)');
     name.addEventListener('click', () => editTitle(task, name));
@@ -506,15 +537,19 @@ function renderTasks () {
       .filter(Boolean)
       .flatMap(list => [ dot(list), list.name ]);
 
-    ul.append(el('li', { class: [done ? 'done' : '', isOverdue(task) ? 'overdue' : ''].join(' ') },
-      el('input', { type: 'checkbox', checked: done, title: done ? 'Mark not done' : 'Mark done',
-                    onchange: (ev) => setDone(task, ev.target.checked).catch(showError) }),
+    const state = done ? 'done' : failed ? 'failed' : '';
+    ul.append(el('li', { class: [state, isOverdue(task) ? 'overdue' : ''].join(' ') },
+      el('input', { type: 'checkbox', checked: done || failed,
+                    title: done ? 'Mark not done' : failed ? 'Mark not failed' : 'Mark done',
+                    onchange: (ev) => setProgress(task, ev.target.checked ? 'completed' : 'needs-action').catch(showError) }),
       name,
       el('span', { class: 'due' },
         task.due ? formatDue(task) : '',
         S.listId ? '' : el('span', { class: 'in' }, task.due ? ' · ' : '', ...inLists)),
+      el('button', { class: 'quiet fail', type: 'button', title: 'Mark failed',
+                     onclick: () => setProgress(task, 'failed').catch(showError) }, icon(ICONS.failed)),
       el('button', { class: 'quiet', type: 'button', title: 'Delete task',
-                     onclick: () => destroyTask(task).catch(showError) }, '×'),
+                     onclick: () => destroyTask(task).catch(showError) }, icon(ICONS.trash)),
     ));
   }
 }

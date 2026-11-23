@@ -381,7 +381,7 @@ func TestTaskLifecycle(t *testing.T) {
 	}
 	listID := resps[0].Args["created"].(obj)["l"].(obj)["id"].(string)
 	created := resps[1].Args["created"].(obj)["k1"].(obj)
-	for _, p := range []string{"id", "uid", "created", "updated"} {
+	for _, p := range []string{"id", "version", "uid", "created", "updated"} {
 		if created[p] == nil {
 			t.Errorf("created response lacks %s: %v", p, created)
 		}
@@ -389,7 +389,7 @@ func TestTaskLifecycle(t *testing.T) {
 	taskID := created["id"].(string)
 
 	fetched := resps[2].Args["list"].([]any)[0].(obj)
-	if fetched["title"] != "Renew passport" || fetched["@type"] != "Task" || fetched["priority"] != 3.0 {
+	if fetched["title"] != "Renew passport" || fetched["@type"] != "Task" || fetched["version"] != "2.0" || fetched["priority"] != 3.0 {
 		t.Errorf("unexpected task: %v", fetched)
 	}
 	if !reflect.DeepEqual(fetched["taskListIds"], obj{listID: true}) {
@@ -475,6 +475,10 @@ func TestTaskValidation(t *testing.T) {
 	checkTaskInvalid(t, e, obj{"recurrenceRule": obj{"frequency": "weekly"}}, "start")
 	checkTaskInvalid(t, e, obj{"keywords": obj{"a": false}}, "keywords")
 	checkTaskInvalid(t, e, obj{"uid": ""}, "uid")
+	checkTaskInvalid(t, e, obj{"version": "1.0"}, "version")
+	checkTaskInvalid(t, e, obj{"version": "2.1"}, "version")
+	checkTaskInvalid(t, e, obj{"version": 2.0}, "version")
+	e.createTask(listID, obj{"title": "explicitly current", "version": "2.0"})
 
 	// Creating with a uid already in use is reported as alreadyExists with
 	// the id of the existing task, so a retried create can recover it.
@@ -490,8 +494,91 @@ func TestTaskValidation(t *testing.T) {
 	if typ, props := setErrorProps(t, resp, "notUpdated", other); typ != "invalidProperties" || !slices.Equal(props, []string{"uid"}) {
 		t.Errorf("duplicate uid on update: %v", resp["notUpdated"])
 	}
+	resp = e.call("Task/set", obj{"update": obj{other: obj{"version": nil}}})
+	if typ, props := setErrorProps(t, resp, "notUpdated", other); typ != "invalidProperties" || !slices.Equal(props, []string{"version"}) {
+		t.Errorf("removing version: %v", resp["notUpdated"])
+	}
+
 	// A different recurrenceId makes it a different task, not a duplicate.
 	e.createTask(listID, obj{"uid": "dup", "title": "instance", "start": "2026-10-04T09:00:00", "recurrenceId": "2026-10-04T09:00:00"})
+}
+
+// offsetAlert is an alerts map holding one OffsetTrigger alert, relative
+// to relativeTo, or to the default if relativeTo is "".
+func offsetAlert(relativeTo string) obj {
+	trigger := obj{"@type": "OffsetTrigger", "offset": "-PT15M"}
+	if relativeTo != "" {
+		trigger["relativeTo"] = relativeTo
+	}
+	return obj{"a1": obj{"@type": "Alert", "trigger": trigger}}
+}
+
+func TestAlertAnchors(t *testing.T) {
+	e := newEnv(t)
+	listID := e.defaultListID()
+	const day = "2026-10-05T09:00:00"
+	absolute := obj{"a1": obj{"@type": "Alert", "trigger": obj{"@type": "AbsoluteTrigger", "when": "2026-10-05T08:00:00Z"}}}
+
+	checkTaskInvalid(t, e, obj{"alerts": offsetAlert("")}, "alerts")
+	checkTaskInvalid(t, e, obj{"alerts": offsetAlert("start"), "due": day}, "alerts")
+	checkTaskInvalid(t, e, obj{"alerts": offsetAlert("end"), "start": day}, "alerts")
+	e.createTask(listID, obj{"title": "default anchor", "alerts": offsetAlert(""), "start": day})
+	e.createTask(listID, obj{"title": "end anchor", "alerts": offsetAlert("end"), "due": day})
+	e.createTask(listID, obj{"title": "absolute", "alerts": absolute})
+
+	weekly := obj{"frequency": "weekly"}
+	const next = "2026-10-12T09:00:00"
+	checkTaskInvalid(t, e, obj{"start": day, "due": day, "recurrenceRule": weekly, "alerts": offsetAlert("end"),
+		"recurrenceOverrides": obj{next: obj{"due": nil}}}, "recurrenceOverrides")
+	checkTaskInvalid(t, e, obj{"start": day, "recurrenceRule": weekly,
+		"recurrenceOverrides": obj{next: obj{"alerts": offsetAlert("end")}}}, "recurrenceOverrides")
+	checkTaskInvalid(t, e, obj{"start": day, "recurrenceRule": weekly, "alerts": offsetAlert(""),
+		"recurrenceOverrides": obj{next: obj{"start": nil}}}, "recurrenceOverrides")
+	// An instance's start comes from its recurrence id, so it always has
+	// one unless the patch removes it; an excluded instance has no alerts.
+	e.createTask(listID, obj{"title": "weekly", "start": day, "recurrenceRule": weekly,
+		"recurrenceOverrides": obj{next: obj{"alerts": offsetAlert("start")}}})
+	e.createTask(listID, obj{"title": "skipped", "start": day, "due": day, "recurrenceRule": weekly, "alerts": offsetAlert("end"),
+		"recurrenceOverrides": obj{next: obj{"excluded": true}}})
+
+	// Removing the anchor later is caught too.
+	id := e.createTask(listID, obj{"title": "due soon", "alerts": offsetAlert("end"), "due": day})
+	resp := e.call("Task/set", obj{"update": obj{id: obj{"due": nil}}})
+	if typ, props := setErrorProps(t, resp, "notUpdated", id); typ != "invalidProperties" || !slices.Equal(props, []string{"alerts"}) {
+		t.Errorf("removing due under an end alert: %v", resp["notUpdated"])
+	}
+}
+
+func TestReservedProperties(t *testing.T) {
+	e := newEnv(t)
+	listID := e.defaultListID()
+
+	for _, prop := range []string{"localizations", "replyTo", "requestStatus", "excluded", "extra"} {
+		checkTaskInvalid(t, e, obj{prop: obj{}}, prop)
+	}
+	checkTaskInvalid(t, e, obj{"participants": obj{"p1": obj{"@type": "Participant", "name": "Ann", "sendTo": obj{}}}},
+		"participants/p1/sendTo")
+	checkTaskInvalid(t, e, obj{"locations": obj{"l1": obj{"@type": "Location", "name": "Harbour", "description": "by the lighthouse"}}},
+		"locations/l1/description")
+	checkTaskInvalid(t, e, obj{"virtualLocations": obj{"v1": obj{"@type": "VirtualLocation", "uri": "https://example.com/", "description": "call"}}},
+		"virtualLocations/v1/description")
+	checkTaskInvalid(t, e, obj{"links": obj{"a/b": obj{"@type": "Link", "href": "https://example.com/", "extra": 1}}},
+		"links/a~1b/extra")
+	checkTaskInvalid(t, e, obj{"localizations": obj{}, "replyTo": obj{}}, "localizations", "replyTo")
+
+	// Reserved names are only properties; as data they mean nothing.
+	e.createTask(listID, obj{"title": "keywords", "keywords": obj{"extra": true, "localizations": true}})
+
+	weekly := obj{"frequency": "weekly"}
+	const day, next = "2026-10-05T09:00:00", "2026-10-12T09:00:00"
+	checkTaskInvalid(t, e, obj{"start": day, "recurrenceRule": weekly,
+		"recurrenceOverrides": obj{next: obj{"localizations": obj{}}}}, "recurrenceOverrides")
+	checkTaskInvalid(t, e, obj{"start": day, "recurrenceRule": weekly,
+		"recurrenceOverrides": obj{next: obj{"excluded": true, "title": "skipped?"}}}, "recurrenceOverrides")
+	checkTaskInvalid(t, e, obj{"start": day, "recurrenceRule": obj{"frequency": "weekly", "extra": 1}},
+		"recurrenceRule/extra")
+	e.createTask(listID, obj{"title": "skips one", "start": day, "recurrenceRule": weekly,
+		"recurrenceOverrides": obj{next: obj{"excluded": true}}})
 }
 
 // checkQuery runs Task/query in America/New_York with filter and sort and
@@ -523,6 +610,26 @@ func checkQueryInZone(t *testing.T, e *env, tz string, filter any, sortBy []obj,
 	}
 	if !slices.Equal(titles, wantTitles) {
 		t.Errorf("query filter=%v sort=%v: got %v, want %v", filter, sortBy, titles, wantTitles)
+	}
+}
+
+// checkIDSort runs Task/query sorted on id in the given direction and
+// asserts it returns wantCount ids, in that order.  Ids are server-chosen,
+// so the expected order is derived from the ids themselves.
+func checkIDSort(t *testing.T, e *env, ascending bool, wantCount int) {
+	t.Helper()
+	resp := e.call("Task/query", obj{"sort": []obj{{"property": "id", "isAscending": ascending}}})
+	var ids []string
+	for _, id := range resp["ids"].([]any) {
+		ids = append(ids, id.(string))
+	}
+	want := slices.Clone(ids)
+	slices.Sort(want)
+	if !ascending {
+		slices.Reverse(want)
+	}
+	if len(ids) != wantCount || !slices.Equal(ids, want) {
+		t.Errorf("sort on id (ascending=%v): got %v", ascending, ids)
 	}
 }
 
@@ -590,6 +697,12 @@ func TestTaskQuery(t *testing.T) {
 
 	if typ := e.callError("Task/query", obj{"sort": []obj{{"property": "title"}}}); typ != "unsupportedSort" {
 		t.Errorf("sort on title: %s", typ)
+	}
+	checkIDSort(t, e, true, 6)
+	checkIDSort(t, e, false, 6)
+
+	if typ := e.callError("Task/query", obj{"sort": []obj{{"property": "recurrenceId"}}}); typ != "unsupportedSort" {
+		t.Errorf("sort on recurrenceId: %s", typ)
 	}
 	if typ := e.callError("Task/query", obj{"filter": obj{"color": "red"}}); typ != "unsupportedFilter" {
 		t.Errorf("filter on color: %s", typ)

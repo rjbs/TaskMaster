@@ -366,7 +366,13 @@ func TestBearerMiddleware(t *testing.T) {
 	checkAuthorized(t, plain.URL, "bearer "+guestToken, 200, "guest", []string{"guest"})
 	checkAuthorized(t, plain.URL, "Basic dXNlcjpwYXNz", 200, "rjbs", []string{"rjbs", "work"})
 	checkAuthorized(t, plain.URL, "Bearer "+unknownToken, 401, "", nil)
-	checkAuthorized(t, plain.URL, "Bearer "+guestToken[:59]+"x", 401, "", nil)
+	// Change the last character, which spoils the checksum.  It must
+	// differ from the original, or the token is still the guest's.
+	last := "x"
+	if strings.HasSuffix(guestToken, last) {
+		last = "y"
+	}
+	checkAuthorized(t, plain.URL, "Bearer "+guestToken[:len(guestToken)-1]+last, 401, "", nil)
 	if !reflect.DeepEqual(rejected, []string{"unknown bearer token", "malformed bearer token"}) {
 		t.Errorf("rejections reported: %v", rejected)
 	}
