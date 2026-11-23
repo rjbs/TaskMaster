@@ -2,8 +2,7 @@ package tasks
 
 import (
 	"slices"
-
-	"github.com/rjbs/taskmaster/internal/jmap"
+	"strings"
 )
 
 // JSCalendar bis (§1.7.3, §7.4.2.2, Appendix A.2.2) reserves these property
@@ -51,7 +50,7 @@ func reservedPaths(obj map[string]any) []string {
 		coll, _ := obj[prop].(map[string]any)
 		for id, v := range coll {
 			if m, ok := v.(map[string]any); ok {
-				check(prop+"/"+jmap.EscapeToken(id)+"/", m, names)
+				check(prop+"/"+escapeToken(id)+"/", m, names)
 			}
 		}
 	}
@@ -68,4 +67,10 @@ func reservedOverride(obj map[string]any) string {
 		}
 	}
 	return ""
+}
+
+// escapeToken escapes s for use as one JSON Pointer token (RFC 6901 §3).
+func escapeToken(s string) string {
+	s = strings.ReplaceAll(s, "~", "~0")
+	return strings.ReplaceAll(s, "/", "~1")
 }

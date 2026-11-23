@@ -3,6 +3,8 @@ package store
 import (
 	"database/sql"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -19,7 +21,7 @@ func openAtVersion(t *testing.T, path string, n int) *sql.DB {
 			t.Fatalf("migration %d: %v", i+1, err)
 		}
 	}
-	if _, err := db.Exec(`PRAGMA user_version = ` + StateString(int64(n))); err != nil {
+	if _, err := db.Exec(`PRAGMA user_version = ` + strconv.Itoa(n)); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -97,13 +99,12 @@ func insertTaskRow(t *testing.T, db *sql.DB, id, data string, modseq, destroyed 
 	}
 }
 
-// checkTaskRow asserts a task's stored "version" ("" for none) and
-// updated_modseq.
+// checkTaskRow asserts a task's stored "version" ("" for none) and modseq.
 func checkTaskRow(t *testing.T, db *DB, id, wantVersion string, wantModSeq int64) {
 	t.Helper()
 	var version sql.NullString
 	var modseq int64
-	err := db.sql.QueryRow(`SELECT json_extract(data, '$.version'), updated_modseq FROM tasks WHERE id = ?`, id).
+	err := db.sql.QueryRow(`SELECT json_extract(data, '$.version'), modseq FROM tasks WHERE id = ?`, id).
 		Scan(&version, &modseq)
 	if err != nil || version.String != wantVersion || modseq != wantModSeq {
 		t.Errorf("%s: version=%q modseq=%d err=%v; want version=%q modseq=%d",
@@ -132,15 +133,19 @@ func TestMigrateBackfillsVersion(t *testing.T) {
 	checkTaskRow(t, db, "T-a", "2.0", 6)
 	checkTaskRow(t, db, "T-b", "2.0", 2)
 	checkTaskRow(t, db, "T-c", "2.0", 7)
-	checkTaskRow(t, db, "T-gone", "", 5)
 
-	tx, err := db.Begin(t.Context())
-	if err != nil {
-		t.Fatal(err)
+	// The destroyed task was passed over by the backfill, and a later
+	// migration then took it out of the table, leaving a tombstone that
+	// has the modseq it was destroyed at.
+	var gone int64
+	err = db.sql.QueryRow(`SELECT modseq FROM gizmo_tombstone WHERE type = 'Task' AND id = 'T-gone'`).Scan(&gone)
+	if err != nil || gone != 5 {
+		t.Errorf("T-gone's tombstone has modseq %d, error %v; want 5", gone, err)
 	}
-	defer tx.Rollback()
-	if state, err := tx.State("Task"); err != nil || state != 7 {
-		t.Errorf("Task state = %d, %v; want 7", state, err)
+
+	states, err := db.States(t.Context())
+	if err != nil || !strings.HasSuffix(states[TypeTask], "-7") {
+		t.Errorf("Task state = %q, %v; want one ending -7", states[TypeTask], err)
 	}
 }
 
@@ -152,4 +157,78 @@ func TestMigrateVersionWithNoTasks(t *testing.T) {
 		t.Fatalf("opening old database: %v", err)
 	}
 	db.Close()
+}
+
+// A database from before Gizmo's state kit kept destroyed tasks and lists
+// in their tables, and a counter for each type in a table of its own.
+// Opening it deletes what was destroyed, leaving tombstones, and each
+// type's counter goes on from where it was.
+func TestOpenAdoptsOldState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.sqlite")
+	old := openAtVersion(t, path, 5)
+	for _, q := range []string{
+		`INSERT INTO state (type, modseq) VALUES ('TaskList', 5), ('Task', 6)`,
+		`INSERT INTO tasklists (id, name, created_modseq, updated_modseq, destroyed_modseq)
+		 VALUES ('L-1', 'Kept', 1, 4, NULL), ('L-2', 'Gone', 2, 5, 5)`,
+		`INSERT INTO tasks (id, uid, data, progress, progress_rank, created, updated, created_modseq, updated_modseq, destroyed_modseq)
+		 VALUES ('T-1', 'u1', '{}', 'needs-action', 0, '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z', 1, 3, NULL),
+		        ('T-2', 'u1', '{"secret":true}', 'needs-action', 0, '2026-10-01T00:00:00Z', '2026-10-01T00:00:00Z', 2, 6, 6)`,
+		`INSERT INTO task_lists (task_id, list_id) VALUES ('T-1', 'L-1')`,
+		`INSERT INTO tasks_fts (task_id, title) VALUES ('T-1', 'kept'), ('T-2', 'gone')`,
+	} {
+		if _, err := old.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	old.Close()
+
+	// Twice, since the second opening finds the work already done.
+	for range 2 {
+		db, err := Open(path)
+		if err != nil {
+			t.Fatalf("opening old database: %v", err)
+		}
+		states, err := db.States(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(states[TypeTask], "-6") || !strings.HasSuffix(states[TypeTaskList], "-5") {
+			t.Errorf("states are %v; want Task at 6 and TaskList at 5", states)
+		}
+		epoch := strings.TrimSuffix(states[TypeTask], "6")
+
+		tx, err := db.Read(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		ch, err := tx.Changes(t.Context(), TypeTask, epoch+"2", 0)
+		if err != nil || len(ch.Updated) != 1 || ch.Updated[0] != "T-1" || len(ch.Destroyed) != 1 || ch.Destroyed[0] != "T-2" {
+			t.Errorf("changes to Task since 2: %+v, error %v; want T-1 updated and T-2 destroyed", ch, err)
+		}
+		var tasks, lists, fts, leftovers int
+		tx.QueryRow(`SELECT count(*) FROM tasks`).Scan(&tasks)
+		tx.QueryRow(`SELECT count(*) FROM tasklists`).Scan(&lists)
+		tx.QueryRow(`SELECT count(*) FROM tasks_fts`).Scan(&fts)
+		tx.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name IN ('state', 'old_tombstone')`).Scan(&leftovers)
+		if tasks != 1 || lists != 1 || fts != 1 || leftovers != 0 {
+			t.Errorf("%d tasks, %d lists, %d full-text rows and %d old tables are left; want 1, 1, 1 and 0", tasks, lists, fts, leftovers)
+		}
+		tx.Rollback()
+		db.Close()
+	}
+
+	// Each counter goes on from where it was.
+	db, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tx, err := db.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if n, err := tx.NextModSeq(TypeTask); err != nil || n != 7 {
+		t.Errorf("the next Task modseq is %d, error %v; want 7", n, err)
+	}
 }

@@ -3,11 +3,10 @@ package tasks
 import (
 	"cmp"
 	"database/sql"
-	"slices"
 	"strings"
 	"time"
 
-	"github.com/rjbs/taskmaster/internal/jmap"
+	"github.com/rjbs/gizmo/jmap"
 	"github.com/rjbs/taskmaster/internal/store"
 )
 
@@ -48,122 +47,12 @@ type comparator struct {
 
 type predicate func(*queryRow) bool
 
-func (s *Service) taskQuery(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	expand, err := argBool(args, "expandRecurrences", false)
-	if err != nil {
-		return nil, err
-	}
-	if expand {
-		return nil, jmap.Errorf(ErrCannotCalculateOccurrences, "this server does not expand recurrences")
-	}
-	loc := time.UTC
-	if tzName, ok, err := argString(args, "timeZone"); err != nil {
-		return nil, err
-	} else if ok {
-		if loc, ok = loadZone(tzName); !ok {
-			return nil, jmap.ArgError("timeZone must be an IANA time zone id")
-		}
-	}
-	position, _, err := argInt(args, "position")
-	if err != nil {
-		return nil, err
-	}
-	anchor, hasAnchor, err := argString(args, "anchor")
-	if err != nil {
-		return nil, err
-	}
-	anchorOffset, _, err := argInt(args, "anchorOffset")
-	if err != nil {
-		return nil, err
-	}
-	limit, hasLimit, err := argUint(args, "limit")
-	if err != nil {
-		return nil, err
-	}
-	calculateTotal, err := argBool(args, "calculateTotal", false)
-	if err != nil {
-		return nil, err
-	}
-	comparators, err := parseSort(args["sort"])
-	if err != nil {
-		return nil, err
-	}
-
-	tx, derr := s.begin(c)
-	if derr != nil {
-		return nil, derr
-	}
-	defer tx.Rollback()
-
-	state, derr := tx.State(typeTask)
-	if derr != nil {
-		return nil, derr
-	}
-	match, err := compileFilter(c, tx, args["filter"], loc)
-	if err != nil {
-		return nil, err
-	}
-	rows, derr := loadQueryRows(tx, loc)
-	if derr != nil {
-		return nil, derr
-	}
-
-	var matched []*queryRow
-	for _, r := range rows {
-		if match(r) {
-			matched = append(matched, r)
-		}
-	}
-	slices.SortStableFunc(matched, func(a, b *queryRow) int {
-		for _, cmp := range comparators {
-			if n := cmp.compare(a, b); n != 0 {
-				return n
-			}
-		}
-		return strings.Compare(a.id, b.id)
-	})
-	ids := make([]string, 0, len(matched))
-	for _, r := range matched {
-		ids = append(ids, r.id)
-	}
-
-	total := int64(len(ids))
-	if hasAnchor {
-		real, _ := c.ResolveID(anchor)
-		idx := slices.Index(ids, real)
-		if idx < 0 {
-			return nil, &jmap.MethodError{Type: jmap.ErrAnchorNotFound}
-		}
-		position = int64(idx) + anchorOffset
-	}
-	if position < 0 {
-		position = max(total+position, 0)
-	}
-	position = min(position, total)
-	end := total
-	if hasLimit {
-		end = min(total, position+limit)
-	}
-
-	resp := map[string]any{
-		"accountId":           s.cfg.AccountID,
-		"queryState":          store.StateString(state),
-		"canCalculateChanges": false,
-		"position":            position,
-		"ids":                 ids[position:end],
-	}
-	if calculateTotal {
-		resp["total"] = total
-	}
-	return resp, nil
-}
-
 // loadQueryRows reads every live task's summary and resolves its start and
 // due instants, using loc for tasks that have no zone of their own.
 func loadQueryRows(tx *store.Tx, loc *time.Location) ([]*queryRow, error) {
 	rows, err := tx.Query(`SELECT id, uid, start_local, due_local, time_zone, progress,
 		progress_rank, percent_complete, priority, created, updated
-		FROM tasks WHERE destroyed_modseq IS NULL`)
+		FROM tasks`)
 	if err != nil {
 		return nil, err
 	}
@@ -250,7 +139,7 @@ func nullInt(ni sql.NullInt64) *int64 {
 
 // compileFilter turns a Filter (operator tree or single condition) into a
 // predicate over query rows.
-func compileFilter(c *jmap.Context, tx *store.Tx, f any, loc *time.Location) (predicate, *jmap.MethodError) {
+func compileFilter(c *jmap.Call, tx *store.Tx, f any, loc *time.Location) (predicate, *jmap.MethodError) {
 	switch v := f.(type) {
 	case nil:
 		return func(*queryRow) bool { return true }, nil
@@ -264,7 +153,7 @@ func compileFilter(c *jmap.Context, tx *store.Tx, f any, loc *time.Location) (pr
 	}
 }
 
-func compileOperator(c *jmap.Context, tx *store.Tx, op string, conditions any, loc *time.Location) (predicate, *jmap.MethodError) {
+func compileOperator(c *jmap.Call, tx *store.Tx, op string, conditions any, loc *time.Location) (predicate, *jmap.MethodError) {
 	list, ok := conditions.([]any)
 	if !ok {
 		return nil, &jmap.MethodError{Type: jmap.ErrUnsupportedFilter, Description: "conditions must be an array"}
@@ -303,7 +192,7 @@ func compileOperator(c *jmap.Context, tx *store.Tx, op string, conditions any, l
 	return nil, &jmap.MethodError{Type: jmap.ErrUnsupportedFilter, Description: "unknown operator " + op}
 }
 
-func compileCondition(c *jmap.Context, tx *store.Tx, cond map[string]any, loc *time.Location) (predicate, *jmap.MethodError) {
+func compileCondition(c *jmap.Call, tx *store.Tx, cond map[string]any, loc *time.Location) (predicate, *jmap.MethodError) {
 	var parts []predicate
 	invalid := func(key, msg string) (predicate, *jmap.MethodError) {
 		return nil, jmap.ArgError("filter %s %s", key, msg)
@@ -492,6 +381,6 @@ func nullLastCompare[T any](a, b *T, compare func(T, T) int, direction func(int)
 	return direction(compare(*a, *b))
 }
 
-func (s *Service) taskQueryChanges(c *jmap.Context, args map[string]any) (map[string]any, error) {
+func (s *Service) taskQueryChanges(c *jmap.Call, args map[string]any) (map[string]any, error) {
 	return nil, &jmap.MethodError{Type: jmap.ErrCannotCalculateChanges}
 }

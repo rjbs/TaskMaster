@@ -3,12 +3,11 @@ package tasks
 import (
 	"database/sql"
 	"encoding/json"
-	"maps"
 	"reflect"
-	"slices"
+	"strconv"
 	"strings"
 
-	"github.com/rjbs/taskmaster/internal/jmap"
+	"github.com/rjbs/gizmo/jmap"
 	"github.com/rjbs/taskmaster/internal/store"
 )
 
@@ -118,7 +117,7 @@ func (l *taskList) toJMAP() map[string]any {
 		"name":                     l.Name,
 		"description":              strOrNil(l.Description),
 		"color":                    strOrNil(l.Color),
-		"sortOrder":                json.Number(store.StateString(l.SortOrder)),
+		"sortOrder":                json.Number(strconv.FormatInt(l.SortOrder, 10)),
 		"isSubscribed":             l.IsSubscribed,
 		"isVisible":                l.IsVisible,
 		"isDefault":                l.IsDefault,
@@ -296,7 +295,7 @@ func scanTaskList(sc interface{ Scan(...any) error }) (*taskList, error) {
 }
 
 func loadTaskList(tx *store.Tx, id string) (*taskList, error) {
-	row := tx.QueryRow(`SELECT `+taskListColumns+` FROM tasklists WHERE id = ? AND destroyed_modseq IS NULL`, id)
+	row := tx.QueryRow(`SELECT `+taskListColumns+` FROM tasklists WHERE id = ?`, id)
 	l, err := scanTaskList(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -306,7 +305,7 @@ func loadTaskList(tx *store.Tx, id string) (*taskList, error) {
 
 func loadAllTaskLists(tx *store.Tx) ([]*taskList, error) {
 	rows, err := tx.Query(`SELECT ` + taskListColumns + ` FROM tasklists
-		WHERE destroyed_modseq IS NULL ORDER BY sort_order, name, id`)
+		ORDER BY sort_order, name, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -340,11 +339,11 @@ func insertTaskList(tx *store.Tx, l *taskList) error {
 	if err != nil {
 		return err
 	}
-	modseq, err := tx.NextModSeq(typeTaskList)
+	modseq, err := tx.Creating(typeTaskList, l.ID)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO tasklists (`+taskListColumns+`, created_modseq, updated_modseq)
+	_, err = tx.Exec(`INSERT INTO tasklists (`+taskListColumns+`, created_modseq, modseq)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		l.ID, l.Name, l.Description, l.Color, l.SortOrder, l.IsSubscribed, l.IsVisible,
 		l.IsDefault, l.AlertsWithTime, l.AlertsWithoutTime, l.TimeZone, vendor, modseq, modseq)
@@ -362,238 +361,11 @@ func updateTaskListRow(tx *store.Tx, l *taskList) error {
 	}
 	_, err = tx.Exec(`UPDATE tasklists SET name = ?, description = ?, color = ?, sort_order = ?,
 		is_subscribed = ?, is_visible = ?, is_default = ?, default_alerts_with_time = ?,
-		default_alerts_without_time = ?, time_zone = ?, vendor_props = ?, updated_modseq = ?
+		default_alerts_without_time = ?, time_zone = ?, vendor_props = ?, modseq = ?
 		WHERE id = ?`,
 		l.Name, l.Description, l.Color, l.SortOrder, l.IsSubscribed, l.IsVisible, l.IsDefault,
 		l.AlertsWithTime, l.AlertsWithoutTime, l.TimeZone, vendor, modseq, l.ID)
 	return err
-}
-
-func (s *Service) taskListGet(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	ids, hasIDs, err := argStringList(args, "ids")
-	if err != nil {
-		return nil, err
-	}
-	props, hasProps, err := argStringList(args, "properties")
-	if err != nil {
-		return nil, err
-	}
-	for _, p := range props {
-		if !taskListProps[p] && !isVendorProp(p) {
-			return nil, jmap.ArgError("unknown property %q", p)
-		}
-	}
-
-	tx, derr := s.begin(c)
-	if derr != nil {
-		return nil, derr
-	}
-	defer tx.Rollback()
-
-	state, derr := tx.State(typeTaskList)
-	if derr != nil {
-		return nil, derr
-	}
-
-	var lists []*taskList
-	notFound := []string{}
-	if !hasIDs {
-		if lists, derr = loadAllTaskLists(tx); derr != nil {
-			return nil, derr
-		}
-	} else {
-		for _, id := range ids {
-			real, ok := c.ResolveID(id)
-			if !ok {
-				notFound = append(notFound, id)
-				continue
-			}
-			l, derr := loadTaskList(tx, real)
-			if derr != nil {
-				return nil, derr
-			}
-			if l == nil {
-				notFound = append(notFound, id)
-				continue
-			}
-			lists = append(lists, l)
-		}
-	}
-
-	list := make([]any, 0, len(lists))
-	for _, l := range lists {
-		list = append(list, filterProperties(l.toJMAP(), props, hasProps))
-	}
-	return map[string]any{
-		"accountId": s.cfg.AccountID,
-		"state":     store.StateString(state),
-		"list":      list,
-		"notFound":  notFound,
-	}, nil
-}
-
-func (s *Service) taskListChanges(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	tx, err := s.begin(c)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	return s.changes(tx, "tasklists", typeTaskList, args)
-}
-
-func (s *Service) taskListSet(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	create, _, err := argObject(args, "create")
-	if err != nil {
-		return nil, err
-	}
-	update, _, err := argObject(args, "update")
-	if err != nil {
-		return nil, err
-	}
-	destroy, _, err := argStringList(args, "destroy")
-	if err != nil {
-		return nil, err
-	}
-	ifInState, hasIfInState, err := argString(args, "ifInState")
-	if err != nil {
-		return nil, err
-	}
-	removeTasks, err := argBool(args, "onDestroyRemoveTasks", false)
-	if err != nil {
-		return nil, err
-	}
-	setDefault, hasSetDefault, err := argString(args, "onSuccessSetIsDefault")
-	if err != nil {
-		return nil, err
-	}
-
-	tx, derr := s.begin(c)
-	if derr != nil {
-		return nil, derr
-	}
-	defer tx.Rollback()
-
-	oldState, derr := tx.State(typeTaskList)
-	if derr != nil {
-		return nil, derr
-	}
-	if hasIfInState && ifInState != store.StateString(oldState) {
-		return nil, &jmap.MethodError{Type: jmap.ErrStateMismatch}
-	}
-
-	created := map[string]any{}
-	notCreated := map[string]any{}
-	updated := map[string]any{}
-	notUpdated := map[string]any{}
-	destroyed := []string{}
-	notDestroyed := map[string]any{}
-
-	for _, cid := range slices.Sorted(maps.Keys(create)) {
-		props, ok := create[cid].(map[string]any)
-		if !ok {
-			notCreated[cid] = jmap.InvalidProperties("the value to create must be an object")
-			continue
-		}
-		l, serr, derr := createTaskList(tx, props)
-		if derr != nil {
-			return nil, derr
-		}
-		if serr != nil {
-			notCreated[cid] = serr
-			continue
-		}
-		c.CreatedIDs[cid] = l.ID
-		created[cid] = map[string]any{
-			"id":        l.ID,
-			"isDefault": false,
-			"myRights":  rights(),
-			"shareWith": nil,
-		}
-	}
-
-	for _, id := range slices.Sorted(maps.Keys(update)) {
-		patch, ok := update[id].(map[string]any)
-		if !ok {
-			notUpdated[id] = jmap.InvalidProperties("the patch must be an object")
-			continue
-		}
-		real, ok := c.ResolveID(id)
-		if !ok {
-			notUpdated[id] = jmap.NotFound()
-			continue
-		}
-		serr, derr := updateTaskList(tx, real, patch)
-		if derr != nil {
-			return nil, derr
-		}
-		if serr != nil {
-			notUpdated[id] = serr
-			continue
-		}
-		updated[id] = nil
-	}
-
-	for _, id := range destroy {
-		real, ok := c.ResolveID(id)
-		if !ok {
-			notDestroyed[id] = jmap.NotFound()
-			continue
-		}
-		serr, derr := s.destroyTaskList(tx, real, removeTasks)
-		if derr != nil {
-			return nil, derr
-		}
-		if serr != nil {
-			notDestroyed[id] = serr
-			continue
-		}
-		destroyed = append(destroyed, id)
-	}
-
-	allSucceeded := len(notCreated)+len(notUpdated)+len(notDestroyed) == 0
-	if allSucceeded && hasSetDefault {
-		if real, ok := c.ResolveID(setDefault); ok {
-			changed, prev, derr := setDefaultTaskList(tx, real)
-			if derr != nil {
-				return nil, derr
-			}
-			if changed {
-				reported := false
-				for _, v := range created {
-					if m := v.(map[string]any); m["id"] == real {
-						m["isDefault"] = true
-						reported = true
-					}
-				}
-				if !reported {
-					updated[real] = map[string]any{"isDefault": true}
-				}
-				if prev != "" {
-					updated[prev] = map[string]any{"isDefault": false}
-				}
-			}
-		}
-	}
-
-	newState, derr := tx.State(typeTaskList)
-	if derr != nil {
-		return nil, derr
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-
-	return map[string]any{
-		"accountId":    s.cfg.AccountID,
-		"oldState":     store.StateString(oldState),
-		"newState":     store.StateString(newState),
-		"created":      nilIfEmpty(created),
-		"notCreated":   nilIfEmpty(notCreated),
-		"updated":      nilIfEmpty(updated),
-		"notUpdated":   nilIfEmpty(notUpdated),
-		"destroyed":    destroyed,
-		"notDestroyed": nilIfEmpty(notDestroyed),
-	}, nil
 }
 
 func createTaskList(tx *store.Tx, props map[string]any) (*taskList, *jmap.SetError, error) {
@@ -700,12 +472,7 @@ func (s *Service) destroyTaskList(tx *store.Tx, id string, removeTasks bool) (*j
 		}
 	}
 
-	modseq, err := tx.NextModSeq(typeTaskList)
-	if err != nil {
-		return nil, err
-	}
-	_, err = tx.Exec(`UPDATE tasklists SET destroyed_modseq = ?, updated_modseq = ? WHERE id = ?`, modseq, modseq, id)
-	return nil, err
+	return nil, tx.Destroy(typeTaskList, id)
 }
 
 // setDefaultTaskList makes id the default list.  It reports whether
@@ -716,7 +483,7 @@ func setDefaultTaskList(tx *store.Tx, id string) (changed bool, prev string, err
 		return false, "", err
 	}
 
-	err = tx.QueryRow(`SELECT id FROM tasklists WHERE is_default AND destroyed_modseq IS NULL`).Scan(&prev)
+	err = tx.QueryRow(`SELECT id FROM tasklists WHERE is_default`).Scan(&prev)
 	if err != nil && err != sql.ErrNoRows {
 		return false, "", err
 	}
@@ -725,7 +492,7 @@ func setDefaultTaskList(tx *store.Tx, id string) (changed bool, prev string, err
 		if err != nil {
 			return false, "", err
 		}
-		if _, err := tx.Exec(`UPDATE tasklists SET is_default = 0, updated_modseq = ? WHERE id = ?`, modseq, prev); err != nil {
+		if _, err := tx.Exec(`UPDATE tasklists SET is_default = 0, modseq = ? WHERE id = ?`, modseq, prev); err != nil {
 			return false, "", err
 		}
 	}
@@ -733,6 +500,6 @@ func setDefaultTaskList(tx *store.Tx, id string) (changed bool, prev string, err
 	if err != nil {
 		return false, "", err
 	}
-	_, err = tx.Exec(`UPDATE tasklists SET is_default = 1, updated_modseq = ? WHERE id = ?`, modseq, id)
+	_, err = tx.Exec(`UPDATE tasklists SET is_default = 1, modseq = ? WHERE id = ?`, modseq, id)
 	return err == nil, prev, err
 }

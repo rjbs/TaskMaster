@@ -10,7 +10,7 @@ needs: a few accounts, each with its own database, and no sharing.
     cp taskmaster.example.json taskmaster.json   # and edit
     ./taskmaster -config taskmaster.json
 
-The Session object is at `/.well-known/jmap`, the API at `/jmap`, and the
+The Session object is at `/.well-known/jmap`, the API at `/jmap/api`, and the
 push event source at `/jmap/eventsource`.  On first start, each account
 gets a default TaskList named "Tasks".
 
@@ -184,3 +184,10 @@ behind the same authentication as the JMAP endpoints.  Set
 * Text search uses SQLite FTS5 with the Porter stemmer.
 * The database schema is versioned with `PRAGMA user_version` and migrated
   on startup.
+* A destroyed task or list is really deleted.  What is left is a
+  tombstone, with its id and nothing else, so that `/changes` can report
+  it.  State strings, modseqs and tombstones are kept by
+  [Gizmo](https://github.com/rjbs/gizmo), in tables named `gizmo_` and
+  something.  A database from before that kept destroyed tasks and lists
+  in place; they are deleted when it is next opened, and every client
+  fetches everything again, once, because state strings changed form.

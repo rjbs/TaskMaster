@@ -1,6 +1,6 @@
 package tasks
 
-import "github.com/rjbs/taskmaster/internal/jmap"
+import "github.com/rjbs/gizmo/jmap"
 
 // TaskNotifications record changes made by other users.  There are no other
 // users, so the collection is permanently empty and its state never moves.
@@ -9,7 +9,7 @@ import "github.com/rjbs/taskmaster/internal/jmap"
 
 const notificationState = "0"
 
-func (s *Service) notificationGet(c *jmap.Context, args map[string]any) (map[string]any, error) {
+func (s *Service) notificationGet(c *jmap.Call, args map[string]any) (map[string]any, error) {
 	ids, _, err := argStringList(args, "ids")
 	if err != nil {
 		return nil, err
@@ -25,7 +25,7 @@ func (s *Service) notificationGet(c *jmap.Context, args map[string]any) (map[str
 	}, nil
 }
 
-func (s *Service) notificationChanges(c *jmap.Context, args map[string]any) (map[string]any, error) {
+func (s *Service) notificationChanges(c *jmap.Call, args map[string]any) (map[string]any, error) {
 	since, ok, err := argString(args, "sinceState")
 	if err != nil {
 		return nil, err
@@ -44,7 +44,7 @@ func (s *Service) notificationChanges(c *jmap.Context, args map[string]any) (map
 	}, nil
 }
 
-func (s *Service) notificationSet(c *jmap.Context, args map[string]any) (map[string]any, error) {
+func (s *Service) notificationSet(c *jmap.Call, args map[string]any) (map[string]any, error) {
 	create, _, err := argObject(args, "create")
 	if err != nil {
 		return nil, err
@@ -84,7 +84,7 @@ func (s *Service) notificationSet(c *jmap.Context, args map[string]any) (map[str
 	}, nil
 }
 
-func (s *Service) notificationQuery(c *jmap.Context, args map[string]any) (map[string]any, error) {
+func (s *Service) notificationQuery(c *jmap.Call, args map[string]any) (map[string]any, error) {
 	resp := map[string]any{
 		"accountId":           s.cfg.AccountID,
 		"queryState":          notificationState,
@@ -100,7 +100,7 @@ func (s *Service) notificationQuery(c *jmap.Context, args map[string]any) (map[s
 	return resp, nil
 }
 
-func (s *Service) notificationQueryChanges(c *jmap.Context, args map[string]any) (map[string]any, error) {
+func (s *Service) notificationQueryChanges(c *jmap.Call, args map[string]any) (map[string]any, error) {
 	since, ok, err := argString(args, "sinceQueryState")
 	if err != nil {
 		return nil, err

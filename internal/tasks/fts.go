@@ -154,7 +154,7 @@ func (s *Service) EnsureSearchIndex(ctx context.Context) error {
 		return nil
 	}
 
-	rows, err := tx.Query(`SELECT id, data FROM tasks WHERE destroyed_modseq IS NULL`)
+	rows, err := tx.Query(`SELECT id, data FROM tasks`)
 	if err != nil {
 		return err
 	}

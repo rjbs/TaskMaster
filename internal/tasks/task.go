@@ -7,7 +7,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/rjbs/taskmaster/internal/jmap"
+	"github.com/rjbs/gizmo/jmap"
 	"github.com/rjbs/taskmaster/internal/store"
 )
 
@@ -293,7 +293,7 @@ func loadTask(tx *store.Tx, id string) (*task, error) {
 	var data string
 	var recurrenceID sql.NullString
 	t := &task{ID: id}
-	err := tx.QueryRow(`SELECT uid, recurrence_id, data FROM tasks WHERE id = ? AND destroyed_modseq IS NULL`, id).
+	err := tx.QueryRow(`SELECT uid, recurrence_id, data FROM tasks WHERE id = ?`, id).
 		Scan(&t.UID, &recurrenceID, &data)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -323,7 +323,7 @@ func loadTask(tx *store.Tx, id string) (*task, error) {
 }
 
 func allTaskIDs(tx *store.Tx) ([]string, error) {
-	rows, err := tx.Query(`SELECT id FROM tasks WHERE destroyed_modseq IS NULL ORDER BY created, id`)
+	rows, err := tx.Query(`SELECT id FROM tasks ORDER BY created, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -347,20 +347,25 @@ func (s *Service) writeTask(tx *store.Tx, t *task, isNew bool) error {
 	if err != nil {
 		return err
 	}
-	modseq, err := tx.NextModSeq(typeTask)
+	var modseq int64
+	if isNew {
+		modseq, err = tx.Creating(typeTask, t.ID)
+	} else {
+		modseq, err = tx.NextModSeq(typeTask)
+	}
 	if err != nil {
 		return err
 	}
 	if isNew {
 		_, err = tx.Exec(`INSERT INTO tasks (id, uid, recurrence_id, data, start_local, due_local,
 			time_zone, progress, progress_rank, percent_complete, priority, created, updated,
-			created_modseq, updated_modseq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			created_modseq, modseq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			t.ID, t.UID, t.RecurrenceID, data, d.startLocal, d.dueLocal, d.timeZone, d.progress,
 			d.progressRank, d.percentComplete, d.priority, d.created, d.updated, modseq, modseq)
 	} else {
 		_, err = tx.Exec(`UPDATE tasks SET uid = ?, recurrence_id = ?, data = ?, start_local = ?,
 			due_local = ?, time_zone = ?, progress = ?, progress_rank = ?, percent_complete = ?,
-			priority = ?, created = ?, updated = ?, updated_modseq = ? WHERE id = ?`,
+			priority = ?, created = ?, updated = ?, modseq = ? WHERE id = ?`,
 			t.UID, t.RecurrenceID, data, d.startLocal, d.dueLocal, d.timeZone, d.progress,
 			d.progressRank, d.percentComplete, d.priority, d.created, d.updated, modseq, t.ID)
 	}
@@ -381,29 +386,19 @@ func (s *Service) writeTask(tx *store.Tx, t *task, isNew bool) error {
 }
 
 func destroyTask(tx *store.Tx, id string) error {
-	modseq, err := tx.NextModSeq(typeTask)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`UPDATE tasks SET destroyed_modseq = ?, updated_modseq = ? WHERE id = ?`, modseq, modseq, id); err != nil {
-		return err
-	}
 	if _, err := tx.Exec(`DELETE FROM task_lists WHERE task_id = ?`, id); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`DELETE FROM tasks_fts WHERE task_id = ?`, id)
-	return err
+	if _, err := tx.Exec(`DELETE FROM tasks_fts WHERE task_id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Destroy(typeTask, id)
 }
 
 // touchTask marks a task as changed without altering its data, used when
 // its taskListIds change because a list was destroyed.
 func touchTask(tx *store.Tx, id string) error {
-	modseq, err := tx.NextModSeq(typeTask)
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(`UPDATE tasks SET updated_modseq = ? WHERE id = ?`, modseq, id)
-	return err
+	return tx.Touch(typeTask, id)
 }
 
 // existingTaskWithUID returns the id of the live task, other than exceptID,
@@ -416,7 +411,7 @@ func existingTaskWithUID(tx *store.Tx, uid string, recurrenceID *string, exceptI
 	}
 	var id string
 	err := tx.QueryRow(`SELECT id FROM tasks WHERE uid = ? AND COALESCE(recurrence_id, '') = ?
-		AND destroyed_modseq IS NULL AND id != ?`, uid, rid, exceptID).Scan(&id)
+		AND id != ?`, uid, rid, exceptID).Scan(&id)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -425,7 +420,7 @@ func existingTaskWithUID(tx *store.Tx, uid string, recurrenceID *string, exceptI
 
 // extractTaskListIDs validates and removes "taskListIds" from obj, resolving
 // creation references and checking that every list exists.
-func extractTaskListIDs(c *jmap.Context, tx *store.Tx, obj map[string]any) ([]string, *jmap.SetError, error) {
+func extractTaskListIDs(c *jmap.Call, tx *store.Tx, obj map[string]any) ([]string, *jmap.SetError, error) {
 	bad := func(msg string) ([]string, *jmap.SetError, error) {
 		return nil, jmap.InvalidProperties("taskListIds: "+msg, "taskListIds"), nil
 	}
@@ -457,80 +452,6 @@ func extractTaskListIDs(c *jmap.Context, tx *store.Tx, obj map[string]any) ([]st
 	return slices.Compact(lists), nil, nil
 }
 
-func (s *Service) taskGet(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	ids, hasIDs, err := argStringList(args, "ids")
-	if err != nil {
-		return nil, err
-	}
-	props, hasProps, err := argStringList(args, "properties")
-	if err != nil {
-		return nil, err
-	}
-	var window [2]*string
-	for i, key := range []string{"recurrenceOverridesAfter", "recurrenceOverridesBefore"} {
-		v, ok, err := argString(args, key)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			if _, valid := parseUTCDateTime(v); !valid {
-				return nil, jmap.ArgError("%s must be a UTCDateTime", key)
-			}
-			window[i] = &v
-		}
-	}
-
-	tx, derr := s.begin(c)
-	if derr != nil {
-		return nil, derr
-	}
-	defer tx.Rollback()
-
-	state, derr := tx.State(typeTask)
-	if derr != nil {
-		return nil, derr
-	}
-	if !hasIDs {
-		if ids, derr = allTaskIDs(tx); derr != nil {
-			return nil, derr
-		}
-	}
-
-	list := make([]any, 0, len(ids))
-	notFound := []string{}
-	for _, id := range ids {
-		real, ok := c.ResolveID(id)
-		if !ok {
-			notFound = append(notFound, id)
-			continue
-		}
-		t, derr := loadTask(tx, real)
-		if derr != nil {
-			return nil, derr
-		}
-		if t == nil {
-			notFound = append(notFound, id)
-			continue
-		}
-		obj := t.toJMAP()
-		s.windowOverrides(obj, window[0], window[1])
-		if _, ok := obj["useDefaultAlerts"]; !ok {
-			obj["useDefaultAlerts"] = false
-		}
-		if !hasProps {
-			delete(obj, "iCalendar")
-		}
-		list = append(list, filterProperties(obj, props, hasProps))
-	}
-
-	return map[string]any{
-		"accountId": s.cfg.AccountID,
-		"state":     store.StateString(state),
-		"list":      list,
-		"notFound":  notFound,
-	}, nil
-}
-
 // windowOverrides drops recurrenceOverrides outside [after, before), both
 // UTCDateTime strings, comparing each override's recurrence id as an
 // instant in the task's zone.
@@ -559,183 +480,6 @@ func (s *Service) windowOverrides(obj map[string]any, after, before *string) {
 	obj["recurrenceOverrides"] = kept
 }
 
-func (s *Service) taskChanges(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	tx, err := s.begin(c)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	return s.changes(tx, "tasks", typeTask, args)
-}
-
-func (s *Service) taskSet(c *jmap.Context, args map[string]any) (map[string]any, error) {
-	create, _, err := argObject(args, "create")
-	if err != nil {
-		return nil, err
-	}
-	update, _, err := argObject(args, "update")
-	if err != nil {
-		return nil, err
-	}
-	destroy, _, err := argStringList(args, "destroy")
-	if err != nil {
-		return nil, err
-	}
-	ifInState, hasIfInState, err := argString(args, "ifInState")
-	if err != nil {
-		return nil, err
-	}
-
-	tx, derr := s.begin(c)
-	if derr != nil {
-		return nil, derr
-	}
-	defer tx.Rollback()
-
-	oldState, derr := tx.State(typeTask)
-	if derr != nil {
-		return nil, derr
-	}
-	if hasIfInState && ifInState != store.StateString(oldState) {
-		return nil, &jmap.MethodError{Type: jmap.ErrStateMismatch}
-	}
-
-	created := map[string]any{}
-	notCreated := map[string]any{}
-	updated := map[string]any{}
-	notUpdated := map[string]any{}
-	destroyed := []string{}
-	notDestroyed := map[string]any{}
-
-	// Remembered so that a privacy conflict found after everything has
-	// been applied can be unwound for just the tasks involved.
-	createdTasks := map[string]*task{}
-	previous := map[string]*task{}
-
-	for _, cid := range slices.Sorted(maps.Keys(create)) {
-		props, ok := create[cid].(map[string]any)
-		if !ok {
-			notCreated[cid] = jmap.InvalidProperties("the value to create must be an object")
-			continue
-		}
-		t, serr, derr := s.createTask(c, tx, props)
-		if derr != nil {
-			return nil, derr
-		}
-		if serr != nil {
-			notCreated[cid] = serr
-			continue
-		}
-		c.CreatedIDs[cid] = t.ID
-		createdTasks[cid] = t
-		created[cid] = map[string]any{
-			"id":      t.ID,
-			"@type":   "Task",
-			"version": t.Data["version"],
-			"uid":     t.UID,
-			"created": t.Data["created"],
-			"updated": t.Data["updated"],
-		}
-	}
-
-	for _, id := range slices.Sorted(maps.Keys(update)) {
-		patch, ok := update[id].(map[string]any)
-		if !ok {
-			notUpdated[id] = jmap.InvalidProperties("the patch must be an object")
-			continue
-		}
-		real, ok := c.ResolveID(id)
-		if !ok {
-			notUpdated[id] = jmap.NotFound()
-			continue
-		}
-		t, prev, serr, derr := s.updateTask(c, tx, real, patch)
-		if derr != nil {
-			return nil, derr
-		}
-		if serr != nil {
-			notUpdated[id] = serr
-			continue
-		}
-		previous[id] = prev
-		updated[id] = map[string]any{"updated": t.Data["updated"]}
-	}
-
-	for _, id := range destroy {
-		real, ok := c.ResolveID(id)
-		if !ok {
-			notDestroyed[id] = jmap.NotFound()
-			continue
-		}
-		t, derr := loadTask(tx, real)
-		if derr != nil {
-			return nil, derr
-		}
-		if t == nil {
-			notDestroyed[id] = jmap.NotFound()
-			continue
-		}
-		if derr := destroyTask(tx, real); derr != nil {
-			return nil, derr
-		}
-		destroyed = append(destroyed, id)
-	}
-
-	// The spec requires every Task sharing a uid to agree on "privacy",
-	// judged after the whole request has been applied so that a client
-	// can change all instances at once.  Offending creates and updates
-	// are unwound here, leaving the rest of the request in place.
-	conflicts, derr := privacyConflicts(tx, createdTasks, previous)
-	if derr != nil {
-		return nil, derr
-	}
-	for cid, t := range createdTasks {
-		if !conflicts[t.UID] {
-			continue
-		}
-		if derr := eraseTask(tx, t.ID); derr != nil {
-			return nil, derr
-		}
-		delete(c.CreatedIDs, cid)
-		delete(created, cid)
-		notCreated[cid] = privacyConflictError()
-	}
-	for id, prev := range previous {
-		cur, derr := loadTask(tx, prev.ID)
-		if derr != nil {
-			return nil, derr
-		}
-		if !conflicts[prev.UID] && (cur == nil || !conflicts[cur.UID]) {
-			continue
-		}
-		if derr := s.writeTask(tx, prev, false); derr != nil {
-			return nil, derr
-		}
-		delete(updated, id)
-		notUpdated[id] = privacyConflictError()
-	}
-
-	newState, derr := tx.State(typeTask)
-	if derr != nil {
-		return nil, derr
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-
-	return map[string]any{
-		"accountId":    s.cfg.AccountID,
-		"oldState":     store.StateString(oldState),
-		"newState":     store.StateString(newState),
-		"created":      nilIfEmpty(created),
-		"notCreated":   nilIfEmpty(notCreated),
-		"updated":      nilIfEmpty(updated),
-		"notUpdated":   nilIfEmpty(notUpdated),
-		"destroyed":    destroyed,
-		"notDestroyed": nilIfEmpty(notDestroyed),
-	}, nil
-}
-
 func privacyConflictError() *jmap.SetError {
 	return jmap.InvalidProperties("all tasks with the same uid must have the same privacy", "privacy")
 }
@@ -759,7 +503,7 @@ func privacyConflicts(tx *store.Tx, createdTasks map[string]*task, previous map[
 	conflicts := map[string]bool{}
 	for uid := range touched {
 		rows, err := tx.Query(`SELECT COUNT(DISTINCT COALESCE(json_extract(data, '$.privacy'), 'public'))
-			FROM tasks WHERE uid = ? AND destroyed_modseq IS NULL`, uid)
+			FROM tasks WHERE uid = ?`, uid)
 		if err != nil {
 			return nil, err
 		}
@@ -793,7 +537,7 @@ func eraseTask(tx *store.Tx, id string) error {
 	return nil
 }
 
-func (s *Service) createTask(c *jmap.Context, tx *store.Tx, props map[string]any) (*task, *jmap.SetError, error) {
+func (s *Service) createTask(c *jmap.Call, tx *store.Tx, props map[string]any) (*task, *jmap.SetError, error) {
 	obj := make(map[string]any, len(props))
 	for k, v := range props {
 		if v != nil {
@@ -850,7 +594,7 @@ func (s *Service) createTask(c *jmap.Context, tx *store.Tx, props map[string]any
 
 // updateTask applies patch to the task and returns the new and previous
 // versions.
-func (s *Service) updateTask(c *jmap.Context, tx *store.Tx, id string, patch map[string]any) (*task, *task, *jmap.SetError, error) {
+func (s *Service) updateTask(c *jmap.Call, tx *store.Tx, id string, patch map[string]any) (*task, *task, *jmap.SetError, error) {
 	prev, err := loadTask(tx, id)
 	if err != nil {
 		return nil, nil, nil, err
