@@ -2,6 +2,8 @@ package store
 
 import (
 	"database/sql"
+	"errors"
+	"maps"
 	"path/filepath"
 	"testing"
 )
@@ -152,4 +154,58 @@ func TestMigrateVersionWithNoTasks(t *testing.T) {
 		t.Fatalf("opening old database: %v", err)
 	}
 	db.Close()
+}
+
+// checkSavepoint runs a transaction that advances Task's state once, then
+// runs a savepoint that advances it once more along with TaskList's and ends
+// as told, and commits.  It checks the states left in the database, and the
+// states the commit announced.
+func checkSavepoint(t *testing.T, name string, fail bool, wantTask, wantList int64, wantAnnounced map[string]string) {
+	t.Helper()
+	db, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var announced map[string]string
+	db.OnCommit(func(changed map[string]string) { announced = changed })
+
+	tx, err := db.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.NextModSeq("Task"); err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("no")
+	err = tx.Savepoint(func() error {
+		for _, typ := range []string{"Task", "TaskList"} {
+			if _, err := tx.NextModSeq(typ); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if fail {
+			return failure
+		}
+		return nil
+	})
+	if fail != (err == failure) {
+		t.Fatalf("%s: the savepoint returned %v", name, err)
+	}
+	task, _ := tx.State("Task")
+	list, _ := tx.State("TaskList")
+	if task != wantTask || list != wantList {
+		t.Errorf("%s: states are Task %d and TaskList %d, want %d and %d", name, task, list, wantTask, wantList)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if !maps.Equal(announced, wantAnnounced) {
+		t.Errorf("%s: announced %v, want %v", name, announced, wantAnnounced)
+	}
+}
+
+func TestSavepoint(t *testing.T) {
+	checkSavepoint(t, "a savepoint that is kept", false, 2, 1, map[string]string{"Task": "2", "TaskList": "1"})
+	checkSavepoint(t, "a savepoint that is undone", true, 1, 0, map[string]string{"Task": "1"})
 }

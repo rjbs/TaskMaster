@@ -11,9 +11,7 @@ package tasks
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"time"
 
@@ -62,15 +60,21 @@ func (s *Service) AccountID() string { return s.cfg.AccountID }
 // decoded JSON, with numbers as json.Number.
 type handler func(c *jmap.Call, args map[string]any) (map[string]any, error)
 
-// methods maps each JMAP method to the Service method implementing it.
+// standardMethods maps each JMAP method that Gizmo's drivers answer to the
+// Service method that sets them to work; see std.go.
+var standardMethods = map[string]func(*Service, *jmap.Call, json.RawMessage) (any, error){
+	"TaskList/get":     (*Service).taskListGet,
+	"TaskList/changes": (*Service).taskListChanges,
+	"TaskList/set":     (*Service).taskListSet,
+	"Task/get":         (*Service).taskGet,
+	"Task/changes":     (*Service).taskChanges,
+	"Task/set":         (*Service).taskSet,
+	"Task/query":       (*Service).taskQuery,
+}
+
+// methods maps each other JMAP method to the Service method implementing
+// it.
 var methods = map[string]func(*Service) handler{
-	"TaskList/get":                  func(s *Service) handler { return s.taskListGet },
-	"TaskList/changes":              func(s *Service) handler { return s.taskListChanges },
-	"TaskList/set":                  func(s *Service) handler { return s.taskListSet },
-	"Task/get":                      func(s *Service) handler { return s.taskGet },
-	"Task/changes":                  func(s *Service) handler { return s.taskChanges },
-	"Task/set":                      func(s *Service) handler { return s.taskSet },
-	"Task/query":                    func(s *Service) handler { return s.taskQuery },
 	"Task/queryChanges":             func(s *Service) handler { return s.taskQueryChanges },
 	"TaskNotification/get":          func(s *Service) handler { return s.notificationGet },
 	"TaskNotification/changes":      func(s *Service) handler { return s.notificationChanges },
@@ -106,6 +110,9 @@ func (r *Registry) Register(p *jmap.Processor) {
 	find := func(id string) (*Service, bool) {
 		svc, ok := r.services[id]
 		return svc, ok
+	}
+	for name, method := range standardMethods {
+		p.Register(name, Capability, auth.ForAccount(find, method))
 	}
 	for name, pick := range methods {
 		p.Register(name, Capability, auth.ForAccount(find, func(svc *Service, c *jmap.Call, raw json.RawMessage) (any, error) {
@@ -158,10 +165,6 @@ func (s *Service) EnsureDefaultTaskList(ctx context.Context) error {
 	return tx.Commit()
 }
 
-func (s *Service) begin(c *jmap.Call) (*store.Tx, error) {
-	return s.db.Begin(c.Context())
-}
-
 func newID(prefix string) string {
 	return prefix + uuid.NewString()
 }
@@ -205,30 +208,6 @@ func argBool(args map[string]any, key string, def bool) (bool, *jmap.MethodError
 		return def, jmap.ArgError("%s must be a boolean", key)
 	}
 	return b, nil
-}
-
-func argInt(args map[string]any, key string) (int64, bool, *jmap.MethodError) {
-	v, ok := args[key]
-	if !ok || v == nil {
-		return 0, false, nil
-	}
-	n, ok := v.(json.Number)
-	if !ok {
-		return 0, false, jmap.ArgError("%s must be an integer", key)
-	}
-	i, err := n.Int64()
-	if err != nil {
-		return 0, false, jmap.ArgError("%s must be an integer", key)
-	}
-	return i, true, nil
-}
-
-func argUint(args map[string]any, key string) (int64, bool, *jmap.MethodError) {
-	i, ok, err := argInt(args, key)
-	if err == nil && ok && i < 0 {
-		return 0, false, jmap.ArgError("%s must not be negative", key)
-	}
-	return i, ok, err
 }
 
 func argStringList(args map[string]any, key string) ([]string, bool, *jmap.MethodError) {
@@ -280,106 +259,6 @@ func nilIfEmpty[M ~map[string]V, V any](m M) M {
 		return nil
 	}
 	return m
-}
-
-// changes implements a standard /changes method over a table that has the
-// created_modseq, updated_modseq and destroyed_modseq columns.
-func (s *Service) changes(tx *store.Tx, table, typ string, args map[string]any) (map[string]any, error) {
-	sinceStr, ok, err := argString(args, "sinceState")
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, jmap.ArgError("sinceState is required")
-	}
-	since, ok := store.ParseState(sinceStr)
-	if !ok {
-		return nil, &jmap.MethodError{Type: jmap.ErrCannotCalculateChanges}
-	}
-	current, derr := tx.State(typ)
-	if derr != nil {
-		return nil, derr
-	}
-	if since > current {
-		return nil, &jmap.MethodError{Type: jmap.ErrCannotCalculateChanges}
-	}
-	maxChanges, hasMax, err := argUint(args, "maxChanges")
-	if err != nil {
-		return nil, err
-	}
-	if hasMax && maxChanges == 0 {
-		return nil, jmap.ArgError("maxChanges must be greater than zero")
-	}
-
-	rows, derr := tx.Query(fmt.Sprintf(`
-		SELECT id, created_modseq, updated_modseq, destroyed_modseq
-		FROM %s WHERE updated_modseq > ? ORDER BY updated_modseq`, table), since)
-	if derr != nil {
-		return nil, derr
-	}
-	defer rows.Close()
-
-	created, updated, destroyed := []string{}, []string{}, []string{}
-	newState := current
-	hasMore := false
-	var count int64
-	for rows.Next() {
-		var id string
-		var cm, um int64
-		var dm sql.NullInt64
-		if err := rows.Scan(&id, &cm, &um, &dm); err != nil {
-			return nil, err
-		}
-		if hasMax && count >= maxChanges {
-			hasMore = true
-			break
-		}
-		switch {
-		case dm.Valid && cm > since:
-			// Created and destroyed since the client last looked; it
-			// never needs to hear about this object.
-			continue
-		case dm.Valid:
-			destroyed = append(destroyed, id)
-		case cm > since:
-			created = append(created, id)
-		default:
-			updated = append(updated, id)
-		}
-		count++
-		newState = um
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if !hasMore {
-		newState = current
-	}
-
-	return map[string]any{
-		"accountId":      s.cfg.AccountID,
-		"oldState":       sinceStr,
-		"newState":       store.StateString(newState),
-		"hasMoreChanges": hasMore,
-		"created":        created,
-		"updated":        updated,
-		"destroyed":      destroyed,
-	}, nil
-}
-
-// filterProperties reduces obj to the requested properties, always keeping
-// "id".  With no properties argument, obj is returned unchanged.
-func filterProperties(obj map[string]any, props []string, hasProps bool) map[string]any {
-	if !hasProps {
-		return obj
-	}
-	out := map[string]any{"id": obj["id"]}
-	for _, p := range props {
-		if v, ok := obj[p]; ok {
-			out[p] = v
-		}
-	}
-	return out
 }
 
 // States returns the current state string of every data type this service

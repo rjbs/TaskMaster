@@ -56,6 +56,7 @@ func New(cfg Config) *Server {
 			return nil
 		},
 		Broker:       cfg.Broker,
+		Limits:       jmap.Limits{MaxObjectsInGet: tasks.MaxObjectsInGet, MaxObjectsInSet: tasks.MaxObjectsInSet},
 		Capabilities: map[string]any{tasks.Capability: map[string]any{}},
 		Collations:   []string{"i;ascii-casemap", "i;unicode-casemap"},
 		Logger:       cfg.Logger,

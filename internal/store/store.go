@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"maps"
 	"strconv"
 	"sync"
 
@@ -129,6 +130,28 @@ func (t *Tx) Rollback() error {
 	}
 	err := t.Tx.Rollback()
 	t.finish()
+	return err
+}
+
+// Savepoint runs fn so that whatever it wrote is undone if it returns an
+// error, and returns fn's error.  What is undone includes the record of
+// which types fn changed, so that a state fn reached and then lost is not
+// announced when the transaction commits.
+func (t *Tx) Savepoint(fn func() error) error {
+	if _, err := t.Exec(`SAVEPOINT object`); err != nil {
+		return err
+	}
+	changed := maps.Clone(t.changed)
+	err := fn()
+	if err != nil {
+		if _, undo := t.Exec(`ROLLBACK TO object`); undo != nil {
+			return undo
+		}
+		t.changed = changed
+	}
+	if _, release := t.Exec(`RELEASE object`); release != nil && err == nil {
+		return release
+	}
 	return err
 }
 
