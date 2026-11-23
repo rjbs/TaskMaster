@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/rjbs/gizmo/jmap"
@@ -116,7 +117,7 @@ func (l *taskList) toJMAP() map[string]any {
 		"name":                     l.Name,
 		"description":              strOrNil(l.Description),
 		"color":                    strOrNil(l.Color),
-		"sortOrder":                json.Number(store.StateString(l.SortOrder)),
+		"sortOrder":                json.Number(strconv.FormatInt(l.SortOrder, 10)),
 		"isSubscribed":             l.IsSubscribed,
 		"isVisible":                l.IsVisible,
 		"isDefault":                l.IsDefault,
@@ -294,7 +295,7 @@ func scanTaskList(sc interface{ Scan(...any) error }) (*taskList, error) {
 }
 
 func loadTaskList(tx *store.Tx, id string) (*taskList, error) {
-	row := tx.QueryRow(`SELECT `+taskListColumns+` FROM tasklists WHERE id = ? AND destroyed_modseq IS NULL`, id)
+	row := tx.QueryRow(`SELECT `+taskListColumns+` FROM tasklists WHERE id = ?`, id)
 	l, err := scanTaskList(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -304,7 +305,7 @@ func loadTaskList(tx *store.Tx, id string) (*taskList, error) {
 
 func loadAllTaskLists(tx *store.Tx) ([]*taskList, error) {
 	rows, err := tx.Query(`SELECT ` + taskListColumns + ` FROM tasklists
-		WHERE destroyed_modseq IS NULL ORDER BY sort_order, name, id`)
+		ORDER BY sort_order, name, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -338,11 +339,11 @@ func insertTaskList(tx *store.Tx, l *taskList) error {
 	if err != nil {
 		return err
 	}
-	modseq, err := tx.NextModSeq(typeTaskList)
+	modseq, err := tx.Creating(typeTaskList, l.ID)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO tasklists (`+taskListColumns+`, created_modseq, updated_modseq)
+	_, err = tx.Exec(`INSERT INTO tasklists (`+taskListColumns+`, created_modseq, modseq)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		l.ID, l.Name, l.Description, l.Color, l.SortOrder, l.IsSubscribed, l.IsVisible,
 		l.IsDefault, l.AlertsWithTime, l.AlertsWithoutTime, l.TimeZone, vendor, modseq, modseq)
@@ -360,7 +361,7 @@ func updateTaskListRow(tx *store.Tx, l *taskList) error {
 	}
 	_, err = tx.Exec(`UPDATE tasklists SET name = ?, description = ?, color = ?, sort_order = ?,
 		is_subscribed = ?, is_visible = ?, is_default = ?, default_alerts_with_time = ?,
-		default_alerts_without_time = ?, time_zone = ?, vendor_props = ?, updated_modseq = ?
+		default_alerts_without_time = ?, time_zone = ?, vendor_props = ?, modseq = ?
 		WHERE id = ?`,
 		l.Name, l.Description, l.Color, l.SortOrder, l.IsSubscribed, l.IsVisible, l.IsDefault,
 		l.AlertsWithTime, l.AlertsWithoutTime, l.TimeZone, vendor, modseq, l.ID)
@@ -471,12 +472,7 @@ func (s *Service) destroyTaskList(tx *store.Tx, id string, removeTasks bool) (*j
 		}
 	}
 
-	modseq, err := tx.NextModSeq(typeTaskList)
-	if err != nil {
-		return nil, err
-	}
-	_, err = tx.Exec(`UPDATE tasklists SET destroyed_modseq = ?, updated_modseq = ? WHERE id = ?`, modseq, modseq, id)
-	return nil, err
+	return nil, tx.Destroy(typeTaskList, id)
 }
 
 // setDefaultTaskList makes id the default list.  It reports whether
@@ -487,7 +483,7 @@ func setDefaultTaskList(tx *store.Tx, id string) (changed bool, prev string, err
 		return false, "", err
 	}
 
-	err = tx.QueryRow(`SELECT id FROM tasklists WHERE is_default AND destroyed_modseq IS NULL`).Scan(&prev)
+	err = tx.QueryRow(`SELECT id FROM tasklists WHERE is_default`).Scan(&prev)
 	if err != nil && err != sql.ErrNoRows {
 		return false, "", err
 	}
@@ -496,7 +492,7 @@ func setDefaultTaskList(tx *store.Tx, id string) (changed bool, prev string, err
 		if err != nil {
 			return false, "", err
 		}
-		if _, err := tx.Exec(`UPDATE tasklists SET is_default = 0, updated_modseq = ? WHERE id = ?`, modseq, prev); err != nil {
+		if _, err := tx.Exec(`UPDATE tasklists SET is_default = 0, modseq = ? WHERE id = ?`, modseq, prev); err != nil {
 			return false, "", err
 		}
 	}
@@ -504,6 +500,6 @@ func setDefaultTaskList(tx *store.Tx, id string) (changed bool, prev string, err
 	if err != nil {
 		return false, "", err
 	}
-	_, err = tx.Exec(`UPDATE tasklists SET is_default = 1, updated_modseq = ? WHERE id = ?`, modseq, id)
+	_, err = tx.Exec(`UPDATE tasklists SET is_default = 1, modseq = ? WHERE id = ?`, modseq, id)
 	return err == nil, prev, err
 }

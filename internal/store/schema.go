@@ -1,8 +1,9 @@
 package store
 
-// Destroyed objects are kept as tombstones (destroyed_modseq set) so that
-// /changes can report them; every query for live objects must filter on
-// destroyed_modseq IS NULL.
+// The tasks and tasklists tables hold only live objects.  What has been
+// destroyed leaves a tombstone in Gizmo's tables, for /changes to report.
+// (The first migration here kept destroyed objects in place, marked with a
+// destroyed_modseq; the last one takes them out.)
 //
 // migrations is applied in order; PRAGMA user_version records how many have
 // run.  Never edit an entry that has shipped; append a new one.
@@ -124,5 +125,39 @@ CREATE TABLE index_versions (
 	name    TEXT PRIMARY KEY,
 	version INTEGER NOT NULL
 );
+`,
+	// JMAP state moves to Gizmo's sqlitekit, which wants a table of live
+	// objects with created_modseq and modseq columns, and keeps tombstones
+	// itself.  Destroyed tasks and lists, which until now stayed in their
+	// tables for good, are deleted here, data and all.  What /changes needs
+	// of them is set aside in old_tombstone, from which adoptKit moves it
+	// to Gizmo's table once that exists, along with the counters in the
+	// state table.  -- claude, 2026-11-22
+	`
+CREATE TABLE old_tombstone (
+	type           TEXT NOT NULL,
+	id             TEXT NOT NULL,
+	created_modseq INTEGER NOT NULL,
+	modseq         INTEGER NOT NULL
+);
+INSERT INTO old_tombstone
+	SELECT 'Task', id, created_modseq, updated_modseq FROM tasks WHERE destroyed_modseq IS NOT NULL;
+INSERT INTO old_tombstone
+	SELECT 'TaskList', id, created_modseq, updated_modseq FROM tasklists WHERE destroyed_modseq IS NOT NULL;
+
+DELETE FROM task_lists
+	WHERE task_id IN (SELECT id FROM old_tombstone WHERE type = 'Task')
+	   OR list_id IN (SELECT id FROM old_tombstone WHERE type = 'TaskList');
+DELETE FROM tasks_fts WHERE task_id IN (SELECT id FROM old_tombstone WHERE type = 'Task');
+DELETE FROM tasks WHERE destroyed_modseq IS NOT NULL;
+DELETE FROM tasklists WHERE destroyed_modseq IS NOT NULL;
+
+DROP INDEX tasks_uid_recurrence;
+ALTER TABLE tasks DROP COLUMN destroyed_modseq;
+ALTER TABLE tasklists DROP COLUMN destroyed_modseq;
+CREATE UNIQUE INDEX tasks_uid_recurrence ON tasks (uid, COALESCE(recurrence_id, ''));
+
+ALTER TABLE tasks RENAME COLUMN updated_modseq TO modseq;
+ALTER TABLE tasklists RENAME COLUMN updated_modseq TO modseq;
 `,
 }

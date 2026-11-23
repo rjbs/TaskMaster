@@ -2,9 +2,7 @@ package tasks
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -21,28 +19,14 @@ import (
 // What is here is what only this package knows: how to load a task or a
 // list, check it, write it and find it.
 
-// txn is a store transaction as Gizmo's drivers know one.
-type txn struct {
-	*store.Tx
-}
+// txn is a store transaction, which is one Gizmo's drivers can run in.
+type txn = store.Tx
 
-func (s *Service) beginTxn(ctx context.Context, _ bool) (*txn, error) {
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return nil, err
+func (s *Service) beginTxn(ctx context.Context, write bool) (*txn, error) {
+	if write {
+		return s.db.Begin(ctx)
 	}
-	return &txn{tx}, nil
-}
-
-// State gives a type's state as a string.  It hides the store's State,
-// which gives it as a number; that one is still there as t.Tx.State.
-func (t *txn) State(_ context.Context, typ string) (string, error) {
-	n, err := t.Tx.State(typ)
-	return store.StateString(n), err
-}
-
-func (t *txn) Savepoint(_ context.Context, fn func() error) error {
-	return t.Tx.Savepoint(fn)
+	return s.db.Read(ctx)
 }
 
 // limits are the limits the standard methods keep to, which are the ones
@@ -84,14 +68,14 @@ func (s *Service) taskListGet(c *jmap.Call, raw json.RawMessage) (any, error) {
 		Load: func(_ context.Context, tx *txn, ids, _ []string) (map[string]map[string]any, []string, error) {
 			var lists []*taskList
 			if ids == nil {
-				all, err := loadAllTaskLists(tx.Tx)
+				all, err := loadAllTaskLists(tx)
 				if err != nil {
 					return nil, nil, err
 				}
 				lists = all
 			}
 			for _, id := range ids {
-				l, err := loadTaskList(tx.Tx, id)
+				l, err := loadTaskList(tx, id)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -110,7 +94,7 @@ func (s *Service) taskListGet(c *jmap.Call, raw json.RawMessage) (any, error) {
 }
 
 func (s *Service) taskListChanges(c *jmap.Call, raw json.RawMessage) (any, error) {
-	return s.changes(c, raw, "tasklists", typeTaskList)
+	return s.changes(c, raw, typeTaskList)
 }
 
 func (s *Service) taskListSet(c *jmap.Call, raw json.RawMessage) (any, error) {
@@ -129,7 +113,7 @@ func (s *Service) taskListSet(c *jmap.Call, raw json.RawMessage) (any, error) {
 			if err != nil {
 				return "", nil, err
 			}
-			l, serr, err := createTaskList(tx.Tx, props)
+			l, serr, err := createTaskList(tx, props)
 			if err := failure(serr, err); err != nil {
 				return "", nil, err
 			}
@@ -140,10 +124,10 @@ func (s *Service) taskListSet(c *jmap.Call, raw json.RawMessage) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			return nil, failure(updateTaskList(tx.Tx, id, patch))
+			return nil, failure(updateTaskList(tx, id, patch))
 		},
 		Destroy: func(_ context.Context, tx *txn, id string) error {
-			return failure(s.destroyTaskList(tx.Tx, id, extra.OnDestroyRemoveTasks))
+			return failure(s.destroyTaskList(tx, id, extra.OnDestroyRemoveTasks))
 		},
 		Finish: func(_ context.Context, tx *txn, r *std.SetResult) error {
 			if extra.OnSuccessSetIsDefault == nil || len(r.NotCreated)+len(r.NotUpdated)+len(r.NotDestroyed) > 0 {
@@ -153,7 +137,7 @@ func (s *Service) taskListSet(c *jmap.Call, raw json.RawMessage) (any, error) {
 			if !ok {
 				return nil
 			}
-			changed, prev, err := setDefaultTaskList(tx.Tx, id)
+			changed, prev, err := setDefaultTaskList(tx, id)
 			if err != nil || !changed {
 				return err
 			}
@@ -197,12 +181,12 @@ func (s *Service) taskGet(c *jmap.Call, raw json.RawMessage) (any, error) {
 		Type: typeTask,
 		Count: func(_ context.Context, tx *txn) (int, error) {
 			var n int
-			err := tx.QueryRow(`SELECT COUNT(*) FROM tasks WHERE destroyed_modseq IS NULL`).Scan(&n)
+			err := tx.QueryRow(`SELECT COUNT(*) FROM tasks`).Scan(&n)
 			return n, err
 		},
 		Load: func(_ context.Context, tx *txn, ids, props []string) (map[string]map[string]any, []string, error) {
 			if ids == nil {
-				all, err := allTaskIDs(tx.Tx)
+				all, err := allTaskIDs(tx)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -210,7 +194,7 @@ func (s *Service) taskGet(c *jmap.Call, raw json.RawMessage) (any, error) {
 			}
 			objects, found := map[string]map[string]any{}, []string{}
 			for _, id := range ids {
-				t, err := loadTask(tx.Tx, id)
+				t, err := loadTask(tx, id)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -235,7 +219,7 @@ func (s *Service) taskGet(c *jmap.Call, raw json.RawMessage) (any, error) {
 }
 
 func (s *Service) taskChanges(c *jmap.Call, raw json.RawMessage) (any, error) {
-	return s.changes(c, raw, "tasks", typeTask)
+	return s.changes(c, raw, typeTask)
 }
 
 func (s *Service) taskSet(c *jmap.Call, raw json.RawMessage) (any, error) {
@@ -256,7 +240,7 @@ func (s *Service) taskSet(c *jmap.Call, raw json.RawMessage) (any, error) {
 			if err != nil {
 				return "", nil, err
 			}
-			t, serr, err := s.createTask(c, tx.Tx, props)
+			t, serr, err := s.createTask(c, tx, props)
 			if err := failure(serr, err); err != nil {
 				return "", nil, err
 			}
@@ -274,7 +258,7 @@ func (s *Service) taskSet(c *jmap.Call, raw json.RawMessage) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			t, prev, serr, err := s.updateTask(c, tx.Tx, id, patch)
+			t, prev, serr, err := s.updateTask(c, tx, id, patch)
 			if err := failure(serr, err); err != nil {
 				return nil, err
 			}
@@ -288,7 +272,7 @@ func (s *Service) taskSet(c *jmap.Call, raw json.RawMessage) (any, error) {
 			return map[string]any{"updated": t.Data["updated"]}, nil
 		},
 		Destroy: func(_ context.Context, tx *txn, id string) error {
-			t, err := loadTask(tx.Tx, id)
+			t, err := loadTask(tx, id)
 			if err != nil {
 				return err
 			}
@@ -297,7 +281,7 @@ func (s *Service) taskSet(c *jmap.Call, raw json.RawMessage) (any, error) {
 			}
 			delete(createdTasks, id)
 			delete(previous, id)
-			return destroyTask(tx.Tx, id)
+			return destroyTask(tx, id)
 		},
 
 		// The spec requires every Task sharing a uid to agree on
@@ -306,7 +290,7 @@ func (s *Service) taskSet(c *jmap.Call, raw json.RawMessage) (any, error) {
 		// creates and updates are unwound here, leaving the rest of the
 		// request in place.
 		Finish: func(_ context.Context, tx *txn, r *std.SetResult) error {
-			conflicts, err := privacyConflicts(tx.Tx, createdTasks, previous)
+			conflicts, err := privacyConflicts(tx, createdTasks, previous)
 			if err != nil {
 				return err
 			}
@@ -315,7 +299,7 @@ func (s *Service) taskSet(c *jmap.Call, raw json.RawMessage) (any, error) {
 				if t == nil || !conflicts[t.UID] {
 					continue
 				}
-				if err := eraseTask(tx.Tx, t.ID); err != nil {
+				if err := eraseTask(tx, t.ID); err != nil {
 					return err
 				}
 				delete(r.Created, cid)
@@ -323,14 +307,14 @@ func (s *Service) taskSet(c *jmap.Call, raw json.RawMessage) (any, error) {
 				r.NotCreated[cid] = privacyConflictError()
 			}
 			for id, prev := range previous {
-				cur, err := loadTask(tx.Tx, prev.ID)
+				cur, err := loadTask(tx, prev.ID)
 				if err != nil {
 					return err
 				}
 				if !conflicts[prev.UID] && (cur == nil || !conflicts[cur.UID]) {
 					continue
 				}
-				if err := s.writeTask(tx.Tx, prev, false); err != nil {
+				if err := s.writeTask(tx, prev, false); err != nil {
 					return err
 				}
 				delete(r.Updated, id)
@@ -387,11 +371,11 @@ func (s *Service) taskQuery(c *jmap.Call, raw json.RawMessage) (any, error) {
 	return std.Query(c, s.beginTxn, limits, std.Querier[*txn]{
 		Type: typeTask,
 		All: func(_ context.Context, tx *txn, _ *std.QueryRequest) ([]string, error) {
-			match, filterErr := compileFilter(c, tx.Tx, filter, loc)
+			match, filterErr := compileFilter(c, tx, filter, loc)
 			if filterErr != nil {
 				return nil, filterErr
 			}
-			rows, err := loadQueryRows(tx.Tx, loc)
+			rows, err := loadQueryRows(tx, loc)
 			if err != nil {
 				return nil, err
 			}
@@ -420,70 +404,13 @@ func (s *Service) taskQuery(c *jmap.Call, raw json.RawMessage) (any, error) {
 
 // ---- /changes -----------------------------------------------------------
 
-// changes answers a /changes over a table that has the created_modseq,
-// updated_modseq and destroyed_modseq columns.
-func (s *Service) changes(c *jmap.Call, raw json.RawMessage, table, typ string) (any, error) {
+// changes answers a /changes, which Gizmo's state kit works out.
+func (s *Service) changes(c *jmap.Call, raw json.RawMessage, typ string) (any, error) {
 	req, err := std.ParseChanges(raw, nil)
 	if err != nil {
 		return nil, err
 	}
-	return std.Changes(c, s.beginTxn, req, func(_ context.Context, tx *txn, sinceState string, maxChanges int) (*std.Changed, error) {
-		since, ok := store.ParseState(sinceState)
-		if !ok {
-			return nil, &jmap.MethodError{Type: jmap.ErrCannotCalculateChanges}
-		}
-		current, err := tx.Tx.State(typ)
-		if err != nil {
-			return nil, err
-		}
-		if since > current {
-			return nil, &jmap.MethodError{Type: jmap.ErrCannotCalculateChanges}
-		}
-
-		rows, err := tx.Query(fmt.Sprintf(`
-			SELECT id, created_modseq, updated_modseq, destroyed_modseq
-			FROM %s WHERE updated_modseq > ? ORDER BY updated_modseq`, table), since)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-
-		ch := &std.Changed{}
-		newState := current
-		count := 0
-		for rows.Next() {
-			var id string
-			var cm, um int64
-			var dm sql.NullInt64
-			if err := rows.Scan(&id, &cm, &um, &dm); err != nil {
-				return nil, err
-			}
-			if maxChanges > 0 && count >= maxChanges {
-				ch.HasMore = true
-				break
-			}
-			switch {
-			case dm.Valid && cm > since:
-				// Created and destroyed since the client last looked; it
-				// never needs to hear about this object.
-				continue
-			case dm.Valid:
-				ch.Destroyed = append(ch.Destroyed, id)
-			case cm > since:
-				ch.Created = append(ch.Created, id)
-			default:
-				ch.Updated = append(ch.Updated, id)
-			}
-			count++
-			newState = um
-		}
-		if err := rows.Err(); err != nil {
-			return nil, err
-		}
-		if !ch.HasMore {
-			newState = current
-		}
-		ch.NewState = store.StateString(newState)
-		return ch, nil
+	return std.Changes(c, s.beginTxn, req, func(ctx context.Context, tx *txn, since string, maxChanges int) (*std.Changed, error) {
+		return tx.Changes(ctx, typ, since, maxChanges)
 	})
 }

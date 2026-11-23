@@ -52,7 +52,7 @@ type predicate func(*queryRow) bool
 func loadQueryRows(tx *store.Tx, loc *time.Location) ([]*queryRow, error) {
 	rows, err := tx.Query(`SELECT id, uid, start_local, due_local, time_zone, progress,
 		progress_rank, percent_complete, priority, created, updated
-		FROM tasks WHERE destroyed_modseq IS NULL`)
+		FROM tasks`)
 	if err != nil {
 		return nil, err
 	}

@@ -26,8 +26,8 @@ import (
 const Capability = "urn:ietf:params:jmap:tasks"
 
 const (
-	typeTaskList = "TaskList"
-	typeTask     = "Task"
+	typeTaskList = store.TypeTaskList
+	typeTask     = store.TypeTask
 )
 
 // Config holds the deployment-specific settings of the service.
@@ -152,7 +152,7 @@ func (s *Service) EnsureDefaultTaskList(ctx context.Context) error {
 	defer tx.Rollback()
 
 	var n int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM tasklists WHERE destroyed_modseq IS NULL`).Scan(&n); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM tasklists`).Scan(&n); err != nil {
 		return err
 	}
 	if n > 0 {
@@ -264,18 +264,10 @@ func nilIfEmpty[M ~map[string]V, V any](m M) M {
 // States returns the current state string of every data type this service
 // serves, keyed by type name.
 func (s *Service) States(ctx context.Context) (map[string]string, error) {
-	tx, err := s.db.Begin(ctx)
+	states, err := s.db.States(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
-	states := map[string]string{"TaskNotification": notificationState}
-	for _, typ := range []string{typeTaskList, typeTask} {
-		n, err := tx.State(typ)
-		if err != nil {
-			return nil, err
-		}
-		states[typ] = store.StateString(n)
-	}
+	states["TaskNotification"] = notificationState
 	return states, nil
 }

@@ -293,7 +293,7 @@ func loadTask(tx *store.Tx, id string) (*task, error) {
 	var data string
 	var recurrenceID sql.NullString
 	t := &task{ID: id}
-	err := tx.QueryRow(`SELECT uid, recurrence_id, data FROM tasks WHERE id = ? AND destroyed_modseq IS NULL`, id).
+	err := tx.QueryRow(`SELECT uid, recurrence_id, data FROM tasks WHERE id = ?`, id).
 		Scan(&t.UID, &recurrenceID, &data)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -323,7 +323,7 @@ func loadTask(tx *store.Tx, id string) (*task, error) {
 }
 
 func allTaskIDs(tx *store.Tx) ([]string, error) {
-	rows, err := tx.Query(`SELECT id FROM tasks WHERE destroyed_modseq IS NULL ORDER BY created, id`)
+	rows, err := tx.Query(`SELECT id FROM tasks ORDER BY created, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -347,20 +347,25 @@ func (s *Service) writeTask(tx *store.Tx, t *task, isNew bool) error {
 	if err != nil {
 		return err
 	}
-	modseq, err := tx.NextModSeq(typeTask)
+	var modseq int64
+	if isNew {
+		modseq, err = tx.Creating(typeTask, t.ID)
+	} else {
+		modseq, err = tx.NextModSeq(typeTask)
+	}
 	if err != nil {
 		return err
 	}
 	if isNew {
 		_, err = tx.Exec(`INSERT INTO tasks (id, uid, recurrence_id, data, start_local, due_local,
 			time_zone, progress, progress_rank, percent_complete, priority, created, updated,
-			created_modseq, updated_modseq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			created_modseq, modseq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			t.ID, t.UID, t.RecurrenceID, data, d.startLocal, d.dueLocal, d.timeZone, d.progress,
 			d.progressRank, d.percentComplete, d.priority, d.created, d.updated, modseq, modseq)
 	} else {
 		_, err = tx.Exec(`UPDATE tasks SET uid = ?, recurrence_id = ?, data = ?, start_local = ?,
 			due_local = ?, time_zone = ?, progress = ?, progress_rank = ?, percent_complete = ?,
-			priority = ?, created = ?, updated = ?, updated_modseq = ? WHERE id = ?`,
+			priority = ?, created = ?, updated = ?, modseq = ? WHERE id = ?`,
 			t.UID, t.RecurrenceID, data, d.startLocal, d.dueLocal, d.timeZone, d.progress,
 			d.progressRank, d.percentComplete, d.priority, d.created, d.updated, modseq, t.ID)
 	}
@@ -381,29 +386,19 @@ func (s *Service) writeTask(tx *store.Tx, t *task, isNew bool) error {
 }
 
 func destroyTask(tx *store.Tx, id string) error {
-	modseq, err := tx.NextModSeq(typeTask)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`UPDATE tasks SET destroyed_modseq = ?, updated_modseq = ? WHERE id = ?`, modseq, modseq, id); err != nil {
-		return err
-	}
 	if _, err := tx.Exec(`DELETE FROM task_lists WHERE task_id = ?`, id); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`DELETE FROM tasks_fts WHERE task_id = ?`, id)
-	return err
+	if _, err := tx.Exec(`DELETE FROM tasks_fts WHERE task_id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Destroy(typeTask, id)
 }
 
 // touchTask marks a task as changed without altering its data, used when
 // its taskListIds change because a list was destroyed.
 func touchTask(tx *store.Tx, id string) error {
-	modseq, err := tx.NextModSeq(typeTask)
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(`UPDATE tasks SET updated_modseq = ? WHERE id = ?`, modseq, id)
-	return err
+	return tx.Touch(typeTask, id)
 }
 
 // existingTaskWithUID returns the id of the live task, other than exceptID,
@@ -416,7 +411,7 @@ func existingTaskWithUID(tx *store.Tx, uid string, recurrenceID *string, exceptI
 	}
 	var id string
 	err := tx.QueryRow(`SELECT id FROM tasks WHERE uid = ? AND COALESCE(recurrence_id, '') = ?
-		AND destroyed_modseq IS NULL AND id != ?`, uid, rid, exceptID).Scan(&id)
+		AND id != ?`, uid, rid, exceptID).Scan(&id)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -508,7 +503,7 @@ func privacyConflicts(tx *store.Tx, createdTasks map[string]*task, previous map[
 	conflicts := map[string]bool{}
 	for uid := range touched {
 		rows, err := tx.Query(`SELECT COUNT(DISTINCT COALESCE(json_extract(data, '$.privacy'), 'public'))
-			FROM tasks WHERE uid = ? AND destroyed_modseq IS NULL`, uid)
+			FROM tasks WHERE uid = ?`, uid)
 		if err != nil {
 			return nil, err
 		}
