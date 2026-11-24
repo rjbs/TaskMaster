@@ -128,6 +128,7 @@ func run(logger *slog.Logger, configPath string) error {
 	}
 	srv := server.New(server.Config{
 		BaseURL:   cfg.BaseURL,
+		HostNames: cfg.HostNames,
 		Directory: cfg.Directory,
 		Accounts:  reg,
 		Processor: proc,
@@ -177,6 +178,7 @@ func run(logger *slog.Logger, configPath string) error {
 		if err != nil {
 			return fmt.Errorf("tailnet listener: %w", err)
 		}
+		srv.Guard().AllowHost(ts.Hostname, node.DNSName)
 		logger.Info("listening on tailnet", "url", node.URL(*ts.HTTPS))
 		serve("tailnet", ln, auth.Bearer(cfg.Directory, reject("tailnet"), auth.Tailscale(cfg.Directory, node.WhoIs, reject("tailnet"), srv)))
 	}

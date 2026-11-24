@@ -54,6 +54,12 @@ type File struct {
 	// object instead of deriving them from each request.
 	BaseURL string `json:"baseUrl"`
 
+	// HostNames are the names clients reach the server by, other than the
+	// one in BaseURL and the tailnet node's, which it knows.  A request
+	// addressed to any other name is refused; one addressed to an IP
+	// address or to localhost never is.
+	HostNames []string `json:"hostNames"`
+
 	// TimeZone is the server's fallback zone for tasks without one.
 	TimeZone string `json:"timeZone"`
 
