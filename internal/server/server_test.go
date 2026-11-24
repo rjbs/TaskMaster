@@ -15,6 +15,7 @@ import (
 
 	"github.com/rjbs/gizmo/auth"
 	"github.com/rjbs/gizmo/jmap"
+	"github.com/rjbs/gizmo/jmaptest"
 	"github.com/rjbs/gizmo/push"
 	"github.com/rjbs/taskmaster/internal/store"
 	"github.com/rjbs/taskmaster/internal/tasks"
@@ -26,11 +27,11 @@ const account = "rjbs"
 
 type obj = map[string]any
 
-// env is a running server with an in-memory database.
+// env is a running server with an in-memory database, and a client of it
+// acting in the account.
 type env struct {
-	t      *testing.T
-	ts     *httptest.Server
-	broker *push.Broker
+	*jmaptest.Tester
+	t *testing.T
 }
 
 func newEnv(t *testing.T) *env {
@@ -69,78 +70,24 @@ func newEnvWith(t *testing.T, page http.Handler) *env {
 	srv := New(Config{Directory: dir, Accounts: reg, Processor: proc, Broker: broker, Page: page})
 	ts := httptest.NewServer(auth.Loopback(dir, srv))
 	t.Cleanup(ts.Close)
-	return &env{t: t, ts: ts, broker: broker}
+
+	tester := jmaptest.New(t, ts.URL, jmap.CoreCapability, tasks.Capability)
+	tester.AccountID = account
+	return &env{Tester: tester, t: t}
 }
 
-// invocation is a method call or response, with its arguments decoded.
-type invocation struct {
-	Name   string
-	Args   obj
-	CallID string
-}
-
-// request posts method calls and returns the raw method responses.
-func (e *env) request(calls ...invocation) []invocation {
+// call runs one method and fails the test unless it is answered by a single
+// sentence of the same name, which it returns.
+func (e *env) call(name string, args obj) *jmaptest.Sentence {
 	e.t.Helper()
-	triples := make([][]any, len(calls))
-	for i, c := range calls {
-		triples[i] = []any{c.Name, c.Args, c.CallID}
-	}
-	body, _ := json.Marshal(obj{
-		"using":       []string{jmap.CoreCapability, tasks.Capability},
-		"methodCalls": triples,
-	})
-	resp, err := http.Post(e.ts.URL+"/jmap/api", "application/json", bytes.NewReader(body))
-	if err != nil {
-		e.t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		e.t.Fatalf("POST /jmap/api: status %d", resp.StatusCode)
-	}
-	var out struct {
-		MethodResponses [][3]json.RawMessage `json:"methodResponses"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		e.t.Fatal(err)
-	}
-	var invs []invocation
-	for _, r := range out.MethodResponses {
-		var inv invocation
-		json.Unmarshal(r[0], &inv.Name)
-		json.Unmarshal(r[1], &inv.Args)
-		json.Unmarshal(r[2], &inv.CallID)
-		invs = append(invs, inv)
-	}
-	return invs
+	return e.Request(jmaptest.Do(name, args)).SingleSentence(name)
 }
 
-func withAccount(args obj) obj {
-	out := obj{"accountId": account}
-	for k, v := range args {
-		out[k] = v
-	}
-	return out
-}
-
-// call runs one method and fails the test if it returns an error.
-func (e *env) call(name string, args obj) obj {
+// callError runs one method and fails the test unless it produces an error
+// of type want.
+func (e *env) callError(name string, args obj, want string) {
 	e.t.Helper()
-	resps := e.request(invocation{Name: name, Args: withAccount(args), CallID: "c"})
-	if resps[0].Name == "error" {
-		e.t.Fatalf("%s returned error: %v", name, resps[0].Args)
-	}
-	return resps[0].Args
-}
-
-// callError runs one method and returns the error type it produced.
-func (e *env) callError(name string, args obj) string {
-	e.t.Helper()
-	resps := e.request(invocation{Name: name, Args: withAccount(args), CallID: "c"})
-	if resps[0].Name != "error" {
-		e.t.Fatalf("%s succeeded; expected an error", name)
-	}
-	return resps[0].Args["type"].(string)
+	e.Request(jmaptest.Do(name, args)).SingleSentence("error").AssertError(want)
 }
 
 func (e *env) createList(name string, extra obj) string {
@@ -149,12 +96,7 @@ func (e *env) createList(name string, extra obj) string {
 	for k, v := range extra {
 		props[k] = v
 	}
-	resp := e.call("TaskList/set", obj{"create": obj{"new": props}})
-	created, _ := resp["created"].(obj)
-	if created["new"] == nil {
-		e.t.Fatalf("TaskList/set did not create %q: %v", name, resp["notCreated"])
-	}
-	return created["new"].(obj)["id"].(string)
+	return e.call("TaskList/set", obj{"create": obj{"new": props}}).AsSet().CreatedID("new")
 }
 
 func (e *env) createTask(listID string, props obj) string {
@@ -163,18 +105,12 @@ func (e *env) createTask(listID string, props obj) string {
 	for k, v := range props {
 		full[k] = v
 	}
-	resp := e.call("Task/set", obj{"create": obj{"new": full}})
-	created, _ := resp["created"].(obj)
-	if created["new"] == nil {
-		e.t.Fatalf("Task/set did not create %v: %v", props, resp["notCreated"])
-	}
-	return created["new"].(obj)["id"].(string)
+	return e.call("Task/set", obj{"create": obj{"new": full}}).AsSet().CreatedID("new")
 }
 
 func (e *env) getTask(id string) obj {
 	e.t.Helper()
-	resp := e.call("Task/get", obj{"ids": []string{id}})
-	list := resp["list"].([]any)
+	list := e.call("Task/get", obj{"ids": []string{id}}).Args["list"].([]any)
 	if len(list) != 1 {
 		e.t.Fatalf("Task/get %s: not found", id)
 	}
@@ -183,8 +119,7 @@ func (e *env) getTask(id string) obj {
 
 func (e *env) getList(id string) obj {
 	e.t.Helper()
-	resp := e.call("TaskList/get", obj{"ids": []string{id}})
-	list := resp["list"].([]any)
+	list := e.call("TaskList/get", obj{"ids": []string{id}}).Args["list"].([]any)
 	if len(list) != 1 {
 		e.t.Fatalf("TaskList/get %s: not found", id)
 	}
@@ -193,7 +128,7 @@ func (e *env) getList(id string) obj {
 
 func (e *env) defaultListID() string {
 	e.t.Helper()
-	for _, l := range e.call("TaskList/get", obj{})["list"].([]any) {
+	for _, l := range e.call("TaskList/get", obj{}).Args["list"].([]any) {
 		if l.(obj)["isDefault"] == true {
 			return l.(obj)["id"].(string)
 		}
@@ -202,15 +137,11 @@ func (e *env) defaultListID() string {
 	return ""
 }
 
-// setErrorProps returns the "properties" of the SetError for key in the
-// given not* map of a /set response.
-func setErrorProps(t *testing.T, resp obj, which, key string) (string, []string) {
+// checkSetError asserts that a SetError, as found by a Set's NotCreated,
+// NotUpdated or NotDestroyed, has type wantType and, if wantProps are given,
+// that its "properties" are exactly those.
+func checkSetError(t *testing.T, se obj, wantType string, wantProps ...string) {
 	t.Helper()
-	m, _ := resp[which].(obj)
-	se, ok := m[key].(obj)
-	if !ok {
-		t.Fatalf("expected a SetError in %s for %s; got %v", which, key, resp)
-	}
 	var props []string
 	if list, ok := se["properties"].([]any); ok {
 		for _, p := range list {
@@ -218,20 +149,15 @@ func setErrorProps(t *testing.T, resp obj, which, key string) (string, []string)
 		}
 	}
 	sort.Strings(props)
-	return se["type"].(string), props
+	sort.Strings(wantProps)
+	if se["type"] != wantType || (wantProps != nil && !slices.Equal(props, wantProps)) {
+		t.Errorf("SetError %v: want %s %v", se, wantType, wantProps)
+	}
 }
 
 func TestSession(t *testing.T) {
 	e := newEnv(t)
-	resp, err := http.Get(e.ts.URL + "/.well-known/jmap")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var sess obj
-	if err := json.NewDecoder(resp.Body).Decode(&sess); err != nil {
-		t.Fatal(err)
-	}
+	sess := e.Session()
 	if sess["username"] != account {
 		t.Errorf("username = %v", sess["username"])
 	}
@@ -243,14 +169,14 @@ func TestSession(t *testing.T) {
 	if caps["mayCreateTaskList"] != true {
 		t.Error("mayCreateTaskList should be true")
 	}
-	if sess["apiUrl"] != e.ts.URL+"/jmap/api" {
+	if sess["apiUrl"] != e.BaseURL+"/jmap/api" {
 		t.Errorf("apiUrl = %v", sess["apiUrl"])
 	}
 }
 
 func TestDefaultTaskListSeeded(t *testing.T) {
 	e := newEnv(t)
-	lists := e.call("TaskList/get", obj{})["list"].([]any)
+	lists := e.call("TaskList/get", obj{}).Args["list"].([]any)
 	if len(lists) != 1 || lists[0].(obj)["name"] != "Tasks" || lists[0].(obj)["isDefault"] != true {
 		t.Errorf("expected one default list named Tasks, got %v", lists)
 	}
@@ -261,22 +187,22 @@ func TestTaskListLifecycle(t *testing.T) {
 	id := e.createList("Groceries", obj{"color": "Teal", "sortOrder": 3})
 
 	l := e.getList(id)
-	if l["name"] != "Groceries" || l["color"] != "Teal" || l["sortOrder"] != 3.0 || l["isSubscribed"] != true || l["isDefault"] != false {
+	if l["name"] != "Groceries" || l["color"] != "Teal" || l["sortOrder"] != json.Number("3") || l["isSubscribed"] != true || l["isDefault"] != false {
 		t.Errorf("unexpected list after create: %v", l)
 	}
 
-	e.call("TaskList/set", obj{"update": obj{id: obj{"name": "Food", "color": nil, "sortOrder": nil}}})
+	e.call("TaskList/set", obj{"update": obj{id: obj{"name": "Food", "color": nil, "sortOrder": nil}}}).AsSet().AssertNoErrors()
 	l = e.getList(id)
-	if l["name"] != "Food" || l["color"] != nil || l["sortOrder"] != 0.0 {
+	if l["name"] != "Food" || l["color"] != nil || l["sortOrder"] != json.Number("0") {
 		t.Errorf("unexpected list after update: %v", l)
 	}
 
-	resp := e.call("TaskList/set", obj{"destroy": []string{id}})
-	if !reflect.DeepEqual(resp["destroyed"], []any{id}) {
-		t.Errorf("destroy failed: %v", resp)
+	set := e.call("TaskList/set", obj{"destroy": []string{id}}).AsSet()
+	if !slices.Equal(set.DestroyedIDs(), []string{id}) {
+		t.Errorf("destroy failed: %v", set)
 	}
 	got := e.call("TaskList/get", obj{"ids": []string{id}})
-	if !reflect.DeepEqual(got["notFound"], []any{id}) {
+	if !slices.Equal(got.Strs("notFound"), []string{id}) {
 		t.Errorf("destroyed list still found: %v", got)
 	}
 }
@@ -285,25 +211,23 @@ func TestTaskListSetDefault(t *testing.T) {
 	e := newEnv(t)
 	oldDefault := e.defaultListID()
 
-	resp := e.call("TaskList/set", obj{
+	set := e.call("TaskList/set", obj{
 		"create":                obj{"w": obj{"name": "Work"}},
 		"onSuccessSetIsDefault": "#w",
-	})
-	created := resp["created"].(obj)["w"].(obj)
+	}).AsSet()
+	created := set.Created("w")
 	if created["isDefault"] != true {
 		t.Errorf("created list should report isDefault true: %v", created)
 	}
-	if upd := resp["updated"].(obj)[oldDefault]; !reflect.DeepEqual(upd, obj{"isDefault": false}) {
-		t.Errorf("old default should be reported updated: %v", resp["updated"])
+	if upd := set.Args["updated"].(obj)[oldDefault]; !reflect.DeepEqual(upd, obj{"isDefault": false}) {
+		t.Errorf("old default should be reported updated: %v", set.Args["updated"])
 	}
 	if e.defaultListID() != created["id"] {
 		t.Error("default did not move")
 	}
 
-	resp = e.call("TaskList/set", obj{"update": obj{oldDefault: obj{"isDefault": true}}})
-	if typ, props := setErrorProps(t, resp, "notUpdated", oldDefault); typ != "invalidProperties" || !slices.Equal(props, []string{"isDefault"}) {
-		t.Errorf("setting isDefault directly should fail: %v", resp)
-	}
+	set = e.call("TaskList/set", obj{"update": obj{oldDefault: obj{"isDefault": true}}}).AsSet()
+	checkSetError(t, set.NotUpdated(oldDefault), "invalidProperties", "isDefault")
 }
 
 func TestTaskListDestroyWithTasks(t *testing.T) {
@@ -313,20 +237,18 @@ func TestTaskListDestroyWithTasks(t *testing.T) {
 	only := e.createTask(doomed, obj{"title": "only in doomed"})
 	both := e.createTask(doomed, obj{"title": "in both", "taskListIds": obj{doomed: true, keep: true}})
 
-	resp := e.call("TaskList/set", obj{"destroy": []string{doomed}})
-	if typ, _ := setErrorProps(t, resp, "notDestroyed", doomed); typ != tasks.SetErrTaskListHasTask {
-		t.Errorf("expected taskListHasTask, got %v", resp)
-	}
+	set := e.call("TaskList/set", obj{"destroy": []string{doomed}}).AsSet()
+	checkSetError(t, set.NotDestroyed(doomed), tasks.SetErrTaskListHasTask)
 
-	resp = e.call("TaskList/set", obj{"destroy": []string{doomed}, "onDestroyRemoveTasks": true})
-	if !reflect.DeepEqual(resp["destroyed"], []any{doomed}) {
-		t.Fatalf("destroy failed: %v", resp)
+	set = e.call("TaskList/set", obj{"destroy": []string{doomed}, "onDestroyRemoveTasks": true}).AsSet()
+	if !slices.Equal(set.DestroyedIDs(), []string{doomed}) {
+		t.Fatalf("destroy failed: %v", set)
 	}
 	got := e.call("Task/get", obj{"ids": []string{only, both}})
-	if !reflect.DeepEqual(got["notFound"], []any{only}) {
+	if !slices.Equal(got.Strs("notFound"), []string{only}) {
 		t.Errorf("task only in the destroyed list should be gone: %v", got)
 	}
-	list := got["list"].([]any)
+	list := got.Args["list"].([]any)
 	if len(list) != 1 || !reflect.DeepEqual(list[0].(obj)["taskListIds"], obj{keep: true}) {
 		t.Errorf("task in both lists should remain only in Keep: %v", list)
 	}
@@ -336,12 +258,8 @@ func TestTaskListDestroyWithTasks(t *testing.T) {
 // invalidProperties SetError naming exactly wantProps.
 func checkListInvalid(t *testing.T, e *env, props obj, wantProps ...string) {
 	t.Helper()
-	resp := e.call("TaskList/set", obj{"create": obj{"x": props}})
-	typ, got := setErrorProps(t, resp, "notCreated", "x")
-	sort.Strings(wantProps)
-	if typ != "invalidProperties" || !slices.Equal(got, wantProps) {
-		t.Errorf("create %v: got %s %v, want invalidProperties %v", props, typ, got, wantProps)
-	}
+	set := e.call("TaskList/set", obj{"create": obj{"x": props}}).AsSet()
+	checkSetError(t, set.NotCreated("x"), "invalidProperties", wantProps...)
 }
 
 func TestTaskListValidation(t *testing.T) {
@@ -366,11 +284,11 @@ func TestTaskListValidation(t *testing.T) {
 
 func TestTaskLifecycle(t *testing.T) {
 	e := newEnv(t)
-	resps := e.request(
-		invocation{Name: "TaskList/set", CallID: "0", Args: withAccount(obj{
+	s := e.Request(
+		jmaptest.Do("TaskList/set", obj{
 			"create": obj{"l": obj{"name": "Errands"}},
-		})},
-		invocation{Name: "Task/set", CallID: "1", Args: withAccount(obj{
+		}),
+		jmaptest.Do("Task/set", obj{
 			"create": obj{"k1": obj{
 				"taskListIds": obj{"#l": true},
 				"title":       "Renew passport",
@@ -379,18 +297,13 @@ func TestTaskLifecycle(t *testing.T) {
 				"priority":    3,
 				"keywords":    obj{"travel": true},
 			}},
-		})},
-		invocation{Name: "Task/get", CallID: "2", Args: withAccount(obj{
+		}),
+		jmaptest.Do("Task/get", obj{
 			"ids": []string{"#k1"},
-		})},
-	)
-	for _, r := range resps {
-		if r.Name == "error" {
-			t.Fatalf("call %s failed: %v", r.CallID, r.Args)
-		}
-	}
-	listID := resps[0].Args["created"].(obj)["l"].(obj)["id"].(string)
-	created := resps[1].Args["created"].(obj)["k1"].(obj)
+		}),
+	).AssertSentences(3)
+	listID := s[0].AssertNamed("TaskList/set").AsSet().CreatedID("l")
+	created := s[1].AssertNamed("Task/set").AsSet().Created("k1")
 	for _, p := range []string{"id", "version", "uid", "created", "updated"} {
 		if created[p] == nil {
 			t.Errorf("created response lacks %s: %v", p, created)
@@ -398,25 +311,25 @@ func TestTaskLifecycle(t *testing.T) {
 	}
 	taskID := created["id"].(string)
 
-	fetched := resps[2].Args["list"].([]any)[0].(obj)
-	if fetched["title"] != "Renew passport" || fetched["@type"] != "Task" || fetched["version"] != "2.0" || fetched["priority"] != 3.0 {
+	fetched := s[2].AssertNamed("Task/get").Args["list"].([]any)[0].(obj)
+	if fetched["title"] != "Renew passport" || fetched["@type"] != "Task" || fetched["version"] != "2.0" || fetched["priority"] != json.Number("3") {
 		t.Errorf("unexpected task: %v", fetched)
 	}
 	if !reflect.DeepEqual(fetched["taskListIds"], obj{listID: true}) {
 		t.Errorf("taskListIds = %v", fetched["taskListIds"])
 	}
 
-	resp := e.call("Task/set", obj{"update": obj{taskID: obj{
+	set := e.call("Task/set", obj{"update": obj{taskID: obj{
 		"progress":        "completed",
 		"percentComplete": 100,
 		"keywords/urgent": true,
 		"priority":        nil,
-	}}})
-	if resp["updated"].(obj)[taskID] == nil {
-		t.Fatalf("update failed: %v", resp)
+	}}}).AsSet()
+	if !slices.Equal(set.UpdatedIDs(), []string{taskID}) {
+		t.Fatalf("update failed: %v", set)
 	}
 	task := e.getTask(taskID)
-	if task["progress"] != "completed" || task["percentComplete"] != 100.0 {
+	if task["progress"] != "completed" || task["percentComplete"] != json.Number("100") {
 		t.Errorf("progress not updated: %v", task)
 	}
 	if _, has := task["priority"]; has {
@@ -429,19 +342,17 @@ func TestTaskLifecycle(t *testing.T) {
 		t.Error("updated should not go backwards")
 	}
 
-	resp = e.call("Task/set", obj{"update": obj{taskID: obj{"id": "T-other"}}})
-	if typ, _ := setErrorProps(t, resp, "notUpdated", taskID); typ != "invalidProperties" {
-		t.Errorf("changing id should fail: %v", resp)
-	}
+	set = e.call("Task/set", obj{"update": obj{taskID: obj{"id": "T-other"}}}).AsSet()
+	checkSetError(t, set.NotUpdated(taskID), "invalidProperties")
 
-	props := e.call("Task/get", obj{"ids": []string{taskID}, "properties": []string{"title"}})["list"].([]any)[0].(obj)
+	props := e.call("Task/get", obj{"ids": []string{taskID}, "properties": []string{"title"}}).Args["list"].([]any)[0].(obj)
 	if len(props) != 2 || props["id"] != taskID || props["title"] != "Renew passport" {
 		t.Errorf("properties filter: %v", props)
 	}
 
-	resp = e.call("Task/set", obj{"destroy": []string{taskID}})
-	if !reflect.DeepEqual(resp["destroyed"], []any{taskID}) {
-		t.Errorf("destroy failed: %v", resp)
+	set = e.call("Task/set", obj{"destroy": []string{taskID}}).AsSet()
+	if !slices.Equal(set.DestroyedIDs(), []string{taskID}) {
+		t.Errorf("destroy failed: %v", set)
 	}
 }
 
@@ -453,12 +364,8 @@ func checkTaskInvalid(t *testing.T, e *env, props obj, wantProps ...string) {
 	for k, v := range props {
 		full[k] = v
 	}
-	resp := e.call("Task/set", obj{"create": obj{"x": full}})
-	typ, got := setErrorProps(t, resp, "notCreated", "x")
-	sort.Strings(wantProps)
-	if typ != "invalidProperties" || !slices.Equal(got, wantProps) {
-		t.Errorf("create %v: got %s %v, want invalidProperties %v", props, typ, got, wantProps)
-	}
+	set := e.call("Task/set", obj{"create": obj{"x": full}}).AsSet()
+	checkSetError(t, set.NotCreated("x"), "invalidProperties", wantProps...)
 }
 
 func TestTaskValidation(t *testing.T) {
@@ -494,20 +401,15 @@ func TestTaskValidation(t *testing.T) {
 	// the id of the existing task, so a retried create can recover it.
 	// Moving an existing task onto a used uid is just an invalid patch.
 	first := e.createTask(listID, obj{"uid": "dup", "title": "first"})
-	resp := e.call("Task/set", obj{"create": obj{"x": obj{"taskListIds": obj{listID: true}, "uid": "dup", "title": "second"}}})
-	se, _ := resp["notCreated"].(obj)["x"].(obj)
-	if se["type"] != "alreadyExists" || se["existingId"] != first {
-		t.Errorf("duplicate uid on create: %v", resp["notCreated"])
+	set := e.call("Task/set", obj{"create": obj{"x": obj{"taskListIds": obj{listID: true}, "uid": "dup", "title": "second"}}}).AsSet()
+	if se := set.NotCreated("x"); se["type"] != "alreadyExists" || se["existingId"] != first {
+		t.Errorf("duplicate uid on create: %v", se)
 	}
 	other := e.createTask(listID, obj{"uid": "other", "title": "third"})
-	resp = e.call("Task/set", obj{"update": obj{other: obj{"uid": "dup"}}})
-	if typ, props := setErrorProps(t, resp, "notUpdated", other); typ != "invalidProperties" || !slices.Equal(props, []string{"uid"}) {
-		t.Errorf("duplicate uid on update: %v", resp["notUpdated"])
-	}
-	resp = e.call("Task/set", obj{"update": obj{other: obj{"version": nil}}})
-	if typ, props := setErrorProps(t, resp, "notUpdated", other); typ != "invalidProperties" || !slices.Equal(props, []string{"version"}) {
-		t.Errorf("removing version: %v", resp["notUpdated"])
-	}
+	set = e.call("Task/set", obj{"update": obj{other: obj{"uid": "dup"}}}).AsSet()
+	checkSetError(t, set.NotUpdated(other), "invalidProperties", "uid")
+	set = e.call("Task/set", obj{"update": obj{other: obj{"version": nil}}}).AsSet()
+	checkSetError(t, set.NotUpdated(other), "invalidProperties", "version")
 
 	// A different recurrenceId makes it a different task, not a duplicate.
 	e.createTask(listID, obj{"uid": "dup", "title": "instance", "start": "2026-10-04T09:00:00", "recurrenceId": "2026-10-04T09:00:00"})
@@ -553,10 +455,8 @@ func TestAlertAnchors(t *testing.T) {
 
 	// Removing the anchor later is caught too.
 	id := e.createTask(listID, obj{"title": "due soon", "alerts": offsetAlert("end"), "due": day})
-	resp := e.call("Task/set", obj{"update": obj{id: obj{"due": nil}}})
-	if typ, props := setErrorProps(t, resp, "notUpdated", id); typ != "invalidProperties" || !slices.Equal(props, []string{"alerts"}) {
-		t.Errorf("removing due under an end alert: %v", resp["notUpdated"])
-	}
+	set := e.call("Task/set", obj{"update": obj{id: obj{"due": nil}}}).AsSet()
+	checkSetError(t, set.NotUpdated(id), "invalidProperties", "alerts")
 }
 
 func TestReservedProperties(t *testing.T) {
@@ -607,16 +507,12 @@ func checkQueryInZone(t *testing.T, e *env, tz string, filter any, sortBy []obj,
 	if sortBy != nil {
 		args["sort"] = sortBy
 	}
-	ids := e.call("Task/query", args)["ids"].([]any)
-	var titles []string
-	for _, id := range ids {
-		titles = append(titles, e.getTask(id.(string))["title"].(string))
+	titles := []string{}
+	for _, id := range e.call("Task/query", args).Strs("ids") {
+		titles = append(titles, e.getTask(id)["title"].(string))
 	}
 	if wantTitles == nil {
 		wantTitles = []string{}
-	}
-	if titles == nil {
-		titles = []string{}
 	}
 	if !slices.Equal(titles, wantTitles) {
 		t.Errorf("query filter=%v sort=%v: got %v, want %v", filter, sortBy, titles, wantTitles)
@@ -628,11 +524,7 @@ func checkQueryInZone(t *testing.T, e *env, tz string, filter any, sortBy []obj,
 // so the expected order is derived from the ids themselves.
 func checkIDSort(t *testing.T, e *env, ascending bool, wantCount int) {
 	t.Helper()
-	resp := e.call("Task/query", obj{"sort": []obj{{"property": "id", "isAscending": ascending}}})
-	var ids []string
-	for _, id := range resp["ids"].([]any) {
-		ids = append(ids, id.(string))
-	}
+	ids := e.call("Task/query", obj{"sort": []obj{{"property": "id", "isAscending": ascending}}}).Strs("ids")
 	want := slices.Clone(ids)
 	slices.Sort(want)
 	if !ascending {
@@ -697,66 +589,53 @@ func TestTaskQuery(t *testing.T) {
 		"File expenses", "Buy bus tickets", "Early bird", "Water the plants", "Plan offsite", "Someday: learn Go")
 
 	resp := e.call("Task/query", obj{"sort": byDue, "position": 1, "limit": 2, "calculateTotal": true})
-	if resp["total"] != 6.0 || resp["position"] != 1.0 || len(resp["ids"].([]any)) != 2 {
+	if resp.Args["total"] != json.Number("6") || resp.Args["position"] != json.Number("1") || len(resp.Strs("ids")) != 2 {
 		t.Errorf("paging: %v", resp)
 	}
 	resp = e.call("Task/query", obj{"sort": byDue, "position": -2})
-	if resp["position"] != 4.0 || len(resp["ids"].([]any)) != 2 {
+	if resp.Args["position"] != json.Number("4") || len(resp.Strs("ids")) != 2 {
 		t.Errorf("negative position: %v", resp)
 	}
 
-	if typ := e.callError("Task/query", obj{"sort": []obj{{"property": "title"}}}); typ != "unsupportedSort" {
-		t.Errorf("sort on title: %s", typ)
-	}
+	e.callError("Task/query", obj{"sort": []obj{{"property": "title"}}}, "unsupportedSort")
 	checkIDSort(t, e, true, 6)
 	checkIDSort(t, e, false, 6)
 
-	if typ := e.callError("Task/query", obj{"sort": []obj{{"property": "recurrenceId"}}}); typ != "unsupportedSort" {
-		t.Errorf("sort on recurrenceId: %s", typ)
-	}
-	if typ := e.callError("Task/query", obj{"filter": obj{"color": "red"}}); typ != "unsupportedFilter" {
-		t.Errorf("filter on color: %s", typ)
-	}
-	if typ := e.callError("Task/query", obj{"expandRecurrences": true, "filter": obj{"after": "2026-01-01T00:00:00", "before": "2026-02-01T00:00:00"}}); typ != tasks.ErrCannotCalculateOccurrences {
-		t.Errorf("expandRecurrences: %s", typ)
-	}
+	e.callError("Task/query", obj{"sort": []obj{{"property": "recurrenceId"}}}, "unsupportedSort")
+	e.callError("Task/query", obj{"filter": obj{"color": "red"}}, "unsupportedFilter")
+	e.callError("Task/query", obj{"expandRecurrences": true, "filter": obj{"after": "2026-01-01T00:00:00", "before": "2026-02-01T00:00:00"}},
+		tasks.ErrCannotCalculateOccurrences)
 }
 
 func TestChanges(t *testing.T) {
 	e := newEnv(t)
 	listID := e.defaultListID()
-	state0 := e.call("Task/get", obj{"ids": []string{}})["state"].(string)
+	state0 := e.call("Task/get", obj{"ids": []string{}}).Str("state")
 
 	a := e.createTask(listID, obj{"title": "a"})
 	b := e.createTask(listID, obj{"title": "b"})
-	state1 := e.call("Task/get", obj{"ids": []string{}})["state"].(string)
+	state1 := e.call("Task/get", obj{"ids": []string{}}).Str("state")
 
-	e.call("Task/set", obj{"update": obj{a: obj{"title": "a2"}}})
-	e.call("Task/set", obj{"destroy": []string{b}})
+	e.call("Task/set", obj{"update": obj{a: obj{"title": "a2"}}}).AsSet().AssertNoErrors()
+	e.call("Task/set", obj{"destroy": []string{b}}).AsSet().AssertNoErrors()
 	c := e.createTask(listID, obj{"title": "c"})
-	e.call("Task/set", obj{"destroy": []string{c}})
+	e.call("Task/set", obj{"destroy": []string{c}}).AsSet().AssertNoErrors()
 
 	checkChanges(t, e, "Task", state0, []string{a}, nil, nil)
 	checkChanges(t, e, "Task", state1, nil, []string{a}, []string{b})
 
 	resp := e.call("Task/changes", obj{"sinceState": state0, "maxChanges": 1})
-	if resp["hasMoreChanges"] != true {
+	if resp.Args["hasMoreChanges"] != true {
 		t.Errorf("expected hasMoreChanges with maxChanges 1: %v", resp)
 	}
-	resp = e.call("Task/changes", obj{"sinceState": resp["newState"]})
-	if resp["hasMoreChanges"] != false {
+	resp = e.call("Task/changes", obj{"sinceState": resp.Str("newState")})
+	if resp.Args["hasMoreChanges"] != false {
 		t.Errorf("second page should finish: %v", resp)
 	}
 
-	if typ := e.callError("Task/changes", obj{"sinceState": "999999"}); typ != "cannotCalculateChanges" {
-		t.Errorf("future state: %s", typ)
-	}
-	if typ := e.callError("Task/set", obj{"ifInState": state0, "destroy": []string{a}}); typ != "stateMismatch" {
-		t.Errorf("stale ifInState: %s", typ)
-	}
-	if typ := e.callError("Task/queryChanges", obj{"sinceQueryState": state0}); typ != "cannotCalculateChanges" {
-		t.Errorf("queryChanges: %s", typ)
-	}
+	e.callError("Task/changes", obj{"sinceState": "999999"}, "cannotCalculateChanges")
+	e.callError("Task/set", obj{"ifInState": state0, "destroy": []string{a}}, "stateMismatch")
+	e.callError("Task/queryChanges", obj{"sinceQueryState": state0}, "cannotCalculateChanges")
 }
 
 // checkChanges compares a /changes response against the expected id sets,
@@ -765,10 +644,7 @@ func checkChanges(t *testing.T, e *env, typ, since string, created, updated, des
 	t.Helper()
 	resp := e.call(typ+"/changes", obj{"sinceState": since})
 	for name, want := range map[string][]string{"created": created, "updated": updated, "destroyed": destroyed} {
-		var got []string
-		for _, id := range resp[name].([]any) {
-			got = append(got, id.(string))
-		}
+		got := resp.Strs(name)
 		sort.Strings(got)
 		sort.Strings(want)
 		if !slices.Equal(got, want) {
@@ -780,102 +656,46 @@ func checkChanges(t *testing.T, e *env, typ, since string, created, updated, des
 func TestNotificationsAreEmpty(t *testing.T) {
 	e := newEnv(t)
 	resp := e.call("TaskNotification/get", obj{"ids": []string{"n1"}})
-	if len(resp["list"].([]any)) != 0 || !reflect.DeepEqual(resp["notFound"], []any{"n1"}) {
+	if len(resp.Args["list"].([]any)) != 0 || !slices.Equal(resp.Strs("notFound"), []string{"n1"}) {
 		t.Errorf("get: %v", resp)
 	}
 	resp = e.call("TaskNotification/query", obj{})
-	if len(resp["ids"].([]any)) != 0 {
+	if len(resp.Strs("ids")) != 0 {
 		t.Errorf("query: %v", resp)
 	}
-	resp = e.call("TaskNotification/set", obj{"create": obj{"x": obj{}}})
-	if typ, _ := setErrorProps(t, resp, "notCreated", "x"); typ != "forbidden" {
-		t.Errorf("set create: %v", resp)
-	}
+	set := e.call("TaskNotification/set", obj{"create": obj{"x": obj{}}}).AsSet()
+	checkSetError(t, set.NotCreated("x"), "forbidden")
 }
 
 func TestRequestErrors(t *testing.T) {
 	e := newEnv(t)
-	post := func(body string) (int, string) {
-		resp, err := http.Post(e.ts.URL+"/jmap/api", "application/json", bytes.NewReader([]byte(body)))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		var pd obj
-		json.NewDecoder(resp.Body).Decode(&pd)
-		typ, _ := pd["type"].(string)
-		return resp.StatusCode, typ
-	}
-	if status, typ := post(`{not json`); status != 400 || typ != jmap.ReqErrNotJSON {
-		t.Errorf("not JSON: %d %s", status, typ)
-	}
-	if status, typ := post(`{"using": []}`); status != 400 || typ != jmap.ReqErrNotRequest {
-		t.Errorf("not a request: %d %s", status, typ)
-	}
-	if status, typ := post(`{"using": ["urn:example:nope"], "methodCalls": []}`); status != 400 || typ != jmap.ReqErrUnknownCapability {
-		t.Errorf("unknown capability: %d %s", status, typ)
-	}
+	e.Post(`{not json`).AssertRequestError(t, jmap.ReqErrNotJSON)
+	e.Post(`{"using": []}`).AssertRequestError(t, jmap.ReqErrNotRequest)
+	e.Post(`{"using": ["urn:example:nope"], "methodCalls": []}`).AssertRequestError(t, jmap.ReqErrUnknownCapability)
 	// RFC 8620 does not oblige a request to use the core capability.
-	if status, _ := post(fmt.Sprintf(`{"using": [%q], "methodCalls": []}`, tasks.Capability)); status != 200 {
-		t.Errorf("a request not using core: %d", status)
-	}
+	e.Post(fmt.Sprintf(`{"using": [%q], "methodCalls": []}`, tasks.Capability)).Response(t)
 
-	resps := e.request(invocation{Name: "Task/get", CallID: "x", Args: obj{"accountId": "nobody"}})
-	if resps[0].Name != "error" || resps[0].Args["type"] != "accountNotFound" {
-		t.Errorf("wrong account: %v", resps[0])
-	}
-	resps = e.request(invocation{Name: "Task/copy", CallID: "x", Args: withAccount(obj{})})
-	if resps[0].Name != "error" || resps[0].Args["type"] != "unknownMethod" {
-		t.Errorf("Task/copy: %v", resps[0])
-	}
+	e.callError("Task/get", obj{"accountId": "nobody"}, "accountNotFound")
+	e.callError("Task/copy", obj{}, "unknownMethod")
 }
 
 func TestEventSource(t *testing.T) {
 	e := newEnv(t)
-	resp, err := http.Get(e.ts.URL + "/jmap/eventsource?types=Task&closeafter=state")
-	if err != nil {
-		t.Fatal(err)
+	stream := e.Listen("types=Task&closeafter=state")
+	if stream.Status != 200 {
+		t.Fatalf("event source: status %d", stream.Status)
 	}
-	defer resp.Body.Close()
-	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
-		t.Fatalf("content type %q", ct)
-	}
-
-	done := make(chan string, 1)
-	go func() {
-		// The stream opens with a comment, which is not an event.
-		buf := make([]byte, 4096)
-		for {
-			n, err := resp.Body.Read(buf)
-			if bytes.Contains(buf[:n], []byte("data: ")) || err != nil {
-				done <- string(buf[:n])
-				return
-			}
-		}
-	}()
 
 	// Give the subscriber a moment to register before we change anything.
 	time.Sleep(50 * time.Millisecond)
 	e.createList("Only lists changed", nil)
 	e.createTask(e.defaultListID(), obj{"title": "poke"})
 
-	select {
-	case event := <-done:
-		var payload obj
-		lines := bytes.Split([]byte(event), []byte("\n"))
-		for _, line := range lines {
-			if bytes.HasPrefix(line, []byte("data: ")) {
-				json.Unmarshal(bytes.TrimPrefix(line, []byte("data: ")), &payload)
-			}
-		}
-		changed, _ := payload["changed"].(obj)
-		acct, _ := changed[account].(obj)
-		if payload["@type"] != "StateChange" || acct["Task"] == nil || acct["TaskList"] != nil {
-			t.Errorf("unexpected event: %s", event)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("no state event received")
+	acct := stream.NextState()[account]
+	if acct["Task"] == "" || acct["TaskList"] != "" {
+		t.Errorf("unexpected event: %v", acct)
 	}
+	stream.AssertClosed()
 }
 
 // TestVendorProperties walks through the NerfJournal encoding from that
@@ -907,31 +727,25 @@ func TestVendorProperties(t *testing.T) {
 	}
 
 	// The sweep.
-	resp := e.call("Task/set", obj{"update": obj{id: obj{
+	e.call("Task/set", obj{"update": obj{id: obj{
 		"progress":        "cancelled",
 		"progressUpdated": "2026-09-14T12:00:07Z",
 		endedAt:           "2026-09-13",
-	}}})
-	if resp["updated"].(obj)[id] == nil {
-		t.Fatalf("sweep update failed: %v", resp)
-	}
+	}}}).AsSet().AssertNoErrors()
 	task = e.getTask(id)
 	if task["progress"] != "cancelled" || task[endedAt] != "2026-09-13" {
 		t.Errorf("sweep not applied: %v", task)
 	}
 
 	// Reopening, plus a category rename and a link change in the same patch.
-	resp = e.call("Task/set", obj{"update": obj{id: obj{
+	e.call("Task/set", obj{"update": obj{id: obj{
 		"progress":                           "needs-action",
 		"progressUpdated":                    nil,
 		endedAt:                              nil,
 		category:                             nil,
 		"keywords/nerfjournal:category:Home": true,
 		"links/nerfjournal-external/href":    "https://example.com/pr/43",
-	}}})
-	if resp["updated"].(obj)[id] == nil {
-		t.Fatalf("reopen update failed: %v", resp)
-	}
+	}}}).AsSet().AssertNoErrors()
 	task = e.getTask(id)
 	for _, p := range []string{endedAt, "progressUpdated"} {
 		if _, has := task[p]; has {
@@ -946,9 +760,9 @@ func TestVendorProperties(t *testing.T) {
 	}
 
 	// Querying by the cancelled state and fetching only vendor properties.
-	e.call("Task/set", obj{"update": obj{id: obj{"progress": "cancelled"}}})
+	e.call("Task/set", obj{"update": obj{id: obj{"progress": "cancelled"}}}).AsSet().AssertNoErrors()
 	checkQuery(t, e, obj{"progress": []string{"cancelled"}}, nil, "Review the release notes")
-	props := e.call("Task/get", obj{"ids": []string{id}, "properties": []string{autoCancel}})["list"].([]any)[0].(obj)
+	props := e.call("Task/get", obj{"ids": []string{id}, "properties": []string{autoCancel}}).Args["list"].([]any)[0].(obj)
 	if len(props) != 2 || props[autoCancel] != true {
 		t.Errorf("vendor property filter: %v", props)
 	}
@@ -956,11 +770,9 @@ func TestVendorProperties(t *testing.T) {
 	// RFC 8620 forbids patching below a parent that does not exist, so a
 	// task with no keywords yet must be given the whole map.
 	bare := e.createTask(e.defaultListID(), obj{"title": "foreign task"})
-	resp = e.call("Task/set", obj{"update": obj{bare: obj{category: true}}})
-	if typ, _ := setErrorProps(t, resp, "notUpdated", bare); typ != "invalidPatch" {
-		t.Errorf("patch into missing keywords: %v", resp)
-	}
-	e.call("Task/set", obj{"update": obj{bare: obj{"keywords": obj{"nerfjournal:category:Work": true}}}})
+	set := e.call("Task/set", obj{"update": obj{bare: obj{category: true}}}).AsSet()
+	checkSetError(t, set.NotUpdated(bare), "invalidPatch")
+	e.call("Task/set", obj{"update": obj{bare: obj{"keywords": obj{"nerfjournal:category:Work": true}}}}).AsSet().AssertNoErrors()
 
 	checkTaskInvalid(t, e, obj{"progressUpdated": "2026-09-13"}, "progressUpdated")
 }
@@ -972,32 +784,32 @@ func TestTaskListVendorProperties(t *testing.T) {
 	const project = "lt.semiotic.systems:project"
 	const meta = "lt.semiotic.systems:meta"
 
-	id := e.createList("Loose Threads", obj{project: "github.com/rjbs/Loose-Threads", meta: obj{"n": 1.0}})
+	id := e.createList("Loose Threads", obj{project: "github.com/rjbs/Loose-Threads", meta: obj{"n": 1}})
 	other := e.createList("Other", nil)
 	l := e.getList(id)
-	if l[project] != "github.com/rjbs/Loose-Threads" || !reflect.DeepEqual(l[meta], obj{"n": 1.0}) {
+	if l[project] != "github.com/rjbs/Loose-Threads" || !reflect.DeepEqual(l[meta], obj{"n": json.Number("1")}) {
 		t.Errorf("vendor properties not stored: %v", l)
 	}
 	if _, has := e.getList(other)[project]; has {
 		t.Error("unset vendor property should be absent")
 	}
 
-	got := e.call("TaskList/get", obj{"ids": []string{id, other}, "properties": []string{project}})["list"].([]any)
+	got := e.call("TaskList/get", obj{"ids": []string{id, other}, "properties": []string{project}}).Args["list"].([]any)
 	if !reflect.DeepEqual(got[0], obj{"id": id, project: "github.com/rjbs/Loose-Threads"}) ||
 		!reflect.DeepEqual(got[1], obj{"id": other}) {
 		t.Errorf("properties filter: %v", got)
 	}
 
-	state := e.call("TaskList/get", obj{"ids": []string{}})["state"].(string)
-	e.call("TaskList/set", obj{"update": obj{id: obj{project: "github.com/rjbs/LooseThreads", meta + "/n": 2.0}}})
+	state := e.call("TaskList/get", obj{"ids": []string{}}).Str("state")
+	e.call("TaskList/set", obj{"update": obj{id: obj{project: "github.com/rjbs/LooseThreads", meta + "/n": 2}}}).AsSet().AssertNoErrors()
 	checkChanges(t, e, "TaskList", state, nil, []string{id}, nil)
 	l = e.getList(id)
-	if l[project] != "github.com/rjbs/LooseThreads" || !reflect.DeepEqual(l[meta], obj{"n": 2.0}) {
+	if l[project] != "github.com/rjbs/LooseThreads" || !reflect.DeepEqual(l[meta], obj{"n": json.Number("2")}) {
 		t.Errorf("vendor properties not updated: %v", l)
 	}
 
-	state = e.call("TaskList/get", obj{"ids": []string{}})["state"].(string)
-	e.call("TaskList/set", obj{"update": obj{id: obj{project: nil, meta: nil}}})
+	state = e.call("TaskList/get", obj{"ids": []string{}}).Str("state")
+	e.call("TaskList/set", obj{"update": obj{id: obj{project: nil, meta: nil}}}).AsSet().AssertNoErrors()
 	checkChanges(t, e, "TaskList", state, nil, []string{id}, nil)
 	l = e.getList(id)
 	for _, p := range []string{project, meta} {
@@ -1006,18 +818,14 @@ func TestTaskListVendorProperties(t *testing.T) {
 		}
 	}
 
-	e.call("TaskList/set", obj{"update": obj{other: obj{project: "github.com/rjbs/Other"}}})
+	e.call("TaskList/set", obj{"update": obj{other: obj{project: "github.com/rjbs/Other"}}}).AsSet().AssertNoErrors()
 	if e.getList(other)[project] != "github.com/rjbs/Other" {
 		t.Error("vendor property not added by update")
 	}
 
-	resp := e.call("TaskList/set", obj{"update": obj{other: obj{"bogus": 1}}})
-	if typ, props := setErrorProps(t, resp, "notUpdated", other); typ != "invalidProperties" || !slices.Equal(props, []string{"bogus"}) {
-		t.Errorf("unprefixed unknown property on update: %v", resp)
-	}
-	if typ := e.callError("TaskList/get", obj{"properties": []string{"bogus"}}); typ != "invalidArguments" {
-		t.Errorf("unknown property in TaskList/get: %s", typ)
-	}
+	set := e.call("TaskList/set", obj{"update": obj{other: obj{"bogus": 1}}}).AsSet()
+	checkSetError(t, set.NotUpdated(other), "invalidProperties", "bogus")
+	e.callError("TaskList/get", obj{"properties": []string{"bogus"}}, "invalidArguments")
 }
 
 func TestUseDefaultAlertsAlwaysReturned(t *testing.T) {
@@ -1026,7 +834,7 @@ func TestUseDefaultAlertsAlwaysReturned(t *testing.T) {
 	if task := e.getTask(id); task["useDefaultAlerts"] != false {
 		t.Errorf("useDefaultAlerts should default to false on get: %v", task)
 	}
-	props := e.call("Task/get", obj{"ids": []string{id}, "properties": []string{"title"}})["list"].([]any)[0].(obj)
+	props := e.call("Task/get", obj{"ids": []string{id}, "properties": []string{"title"}}).Args["list"].([]any)[0].(obj)
 	if _, has := props["useDefaultAlerts"]; has {
 		t.Error("useDefaultAlerts should not be added when properties are requested without it")
 	}
@@ -1046,39 +854,26 @@ func TestPrivacyConsistency(t *testing.T) {
 		return o
 	}
 
-	resp := e.call("Task/set", obj{"create": obj{
+	set := e.call("Task/set", obj{"create": obj{
 		"a": inst("01", "public"), "b": inst("02", "private"), "c": obj{"taskListIds": obj{listID: true}, "title": "unrelated"},
-	}})
+	}}).AsSet()
 	for _, cid := range []string{"a", "b"} {
-		if typ, props := setErrorProps(t, resp, "notCreated", cid); typ != "invalidProperties" || !slices.Equal(props, []string{"privacy"}) {
-			t.Errorf("conflicting create %s should fail on privacy: %v", cid, resp)
-		}
+		checkSetError(t, set.NotCreated(cid), "invalidProperties", "privacy")
 	}
-	if resp["created"].(obj)["c"] == nil {
-		t.Errorf("unrelated create should succeed: %v", resp)
-	}
+	set.Created("c")
 	checkQuery(t, e, obj{"uid": "series"}, nil)
 
-	resp = e.call("Task/set", obj{"create": obj{"a": inst("01", ""), "b": inst("02", "public")}})
-	created := resp["created"].(obj)
-	if created["a"] == nil || created["b"] == nil {
-		t.Fatalf("consistent creates should succeed: %v", resp)
-	}
-	a := created["a"].(obj)["id"].(string)
-	b := created["b"].(obj)["id"].(string)
+	set = e.call("Task/set", obj{"create": obj{"a": inst("01", ""), "b": inst("02", "public")}}).AsSet()
+	a := set.CreatedID("a")
+	b := set.CreatedID("b")
 
-	resp = e.call("Task/set", obj{"update": obj{a: obj{"privacy": "private", "title": "changed"}}})
-	if typ, _ := setErrorProps(t, resp, "notUpdated", a); typ != "invalidProperties" {
-		t.Errorf("lone privacy change should fail: %v", resp)
-	}
+	set = e.call("Task/set", obj{"update": obj{a: obj{"privacy": "private", "title": "changed"}}}).AsSet()
+	checkSetError(t, set.NotUpdated(a), "invalidProperties")
 	if e.getTask(a)["title"] != "instance 01" {
 		t.Error("failed update should have been unwound entirely")
 	}
 
-	resp = e.call("Task/set", obj{"update": obj{a: obj{"privacy": "private"}, b: obj{"privacy": "private"}}})
-	if resp["notUpdated"] != nil {
-		t.Errorf("updating every instance together should succeed: %v", resp)
-	}
+	e.call("Task/set", obj{"update": obj{a: obj{"privacy": "private"}, b: obj{"privacy": "private"}}}).AsSet().AssertNoErrors()
 	if e.getTask(a)["privacy"] != "private" || e.getTask(b)["privacy"] != "private" {
 		t.Error("privacy not applied")
 	}
@@ -1092,88 +887,43 @@ func TestResultReferences(t *testing.T) {
 	e.createTask(listID, obj{"title": "open", "due": "2026-10-05T09:00:00"})
 	e.createTask(listID, obj{"title": "done", "progress": "completed"})
 
-	resps := e.request(
-		invocation{Name: "Task/query", CallID: "1", Args: withAccount(obj{
+	s := e.Request(
+		jmaptest.Do("Task/query", obj{
 			"filter": obj{"progress": []string{"needs-action", "in-process"}},
 			"sort":   []obj{{"property": "due"}},
-		})},
-		invocation{Name: "Task/get", CallID: "2", Args: withAccount(obj{
-			"#ids": obj{"resultOf": "1", "name": "Task/query", "path": "/ids"},
-		})},
-		invocation{Name: "Task/get", CallID: "3", Args: withAccount(obj{
-			"#ids": obj{"resultOf": "1", "name": "Task/query", "path": "/nope"},
-		})},
-		invocation{Name: "Task/get", CallID: "4", Args: withAccount(obj{
-			"#ids": obj{"resultOf": "9", "name": "Task/query", "path": "/ids"},
-		})},
-		invocation{Name: "Task/get", CallID: "5", Args: withAccount(obj{
-			"#ids": obj{"resultOf": "2", "name": "Task/get", "path": "/list/*/id"},
-		})},
-	)
-	if resps[1].Name != "Task/get" {
-		t.Fatalf("result reference failed: %v", resps[1].Args)
-	}
-	list := resps[1].Args["list"].([]any)
+		}).As("1"),
+		jmaptest.Do("Task/get", obj{"#ids": jmaptest.Ref("1", "Task/query", "/ids")}).As("2"),
+		jmaptest.Do("Task/get", obj{"#ids": jmaptest.Ref("1", "Task/query", "/nope")}).As("3"),
+		jmaptest.Do("Task/get", obj{"#ids": jmaptest.Ref("9", "Task/query", "/ids")}).As("4"),
+		jmaptest.Do("Task/get", obj{"#ids": jmaptest.Ref("2", "Task/get", "/list/*/id")}).As("5"),
+	).AssertSentences(5)
+	list := s[1].AssertNamed("Task/get").Args["list"].([]any)
 	if len(list) != 1 || list[0].(obj)["title"] != "open" {
 		t.Errorf("Task/get via #ids: %v", list)
 	}
-	for _, r := range resps[2:4] {
-		if r.Name != "error" || r.Args["type"] != "invalidResultReference" {
-			t.Errorf("call %s should fail with invalidResultReference: %v", r.CallID, r.Args)
-		}
+	s[2].AssertError("invalidResultReference")
+	s[3].AssertError("invalidResultReference")
+	if len(s[4].AssertNamed("Task/get").Args["list"].([]any)) != 1 {
+		t.Errorf("wildcard pointer reference: %v", s[4])
 	}
-	if resps[4].Name != "Task/get" || len(resps[4].Args["list"].([]any)) != 1 {
-		t.Errorf("wildcard pointer reference: %v", resps[4].Args)
-	}
-}
-
-// readEvent reads one SSE event from the body and returns its event name
-// and decoded data.
-func readEvent(t *testing.T, body interface{ Read([]byte) (int, error) }) (string, obj) {
-	t.Helper()
-	buf := make([]byte, 4096)
-	n, err := body.Read(buf)
-	if err != nil {
-		t.Fatalf("reading event: %v", err)
-	}
-	var name string
-	var data obj
-	for _, line := range bytes.Split(buf[:n], []byte("\n")) {
-		if rest, ok := bytes.CutPrefix(line, []byte("event: ")); ok {
-			name = string(rest)
-		}
-		if rest, ok := bytes.CutPrefix(line, []byte("data: ")); ok {
-			json.Unmarshal(rest, &data)
-		}
-	}
-	return name, data
 }
 
 func TestEventSourceInitialState(t *testing.T) {
 	e := newEnv(t)
-	taskState := e.call("Task/get", obj{"ids": []string{}})["state"]
+	taskState := e.call("Task/get", obj{"ids": []string{}}).Str("state")
 
-	resp, err := http.Get(e.ts.URL + "/jmap/eventsource?types=*&closeafter=no&ping=0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	name, data := readEvent(t, resp.Body)
-	changed, _ := data["changed"].(obj)
-	acct, _ := changed[account].(obj)
-	if name != "state" || acct["Task"] != taskState || acct["TaskList"] == nil || acct["TaskNotification"] != "0" {
-		t.Errorf("initial event: %s %v", name, data)
+	acct := e.Listen("types=*&closeafter=no&ping=0").NextState()[account]
+	if acct["Task"] != taskState || acct["TaskList"] == "" || acct["TaskNotification"] != "0" {
+		t.Errorf("initial event: %v", acct)
 	}
 
 	// A closeafter=state client must not be closed by the opening event;
 	// with pinging on it gets a ping as its first byte instead.
-	resp2, err := http.Get(e.ts.URL + "/jmap/eventsource?types=*&closeafter=state&ping=5")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp2.Body.Close()
-	if name, data := readEvent(t, resp2.Body); name != "ping" || data["interval"] != 5.0 {
-		t.Errorf("closeafter=state first event: %s %v", name, data)
+	ev := e.Listen("types=*&closeafter=state&ping=5").Next()
+	var data obj
+	json.Unmarshal([]byte(ev.Data), &data)
+	if ev.Type != "ping" || data["interval"] != 5.0 {
+		t.Errorf("closeafter=state first event: %s %s", ev.Type, ev.Data)
 	}
 }
 
@@ -1182,7 +932,7 @@ func TestDemoPage(t *testing.T) {
 		t.Helper()
 		e := newEnvWith(t, page)
 		for _, path := range []string{"/", "/index.html"} {
-			resp, err := http.Get(e.ts.URL + path)
+			resp, err := http.Get(e.BaseURL + path)
 			if err != nil {
 				t.Fatal(err)
 			}
