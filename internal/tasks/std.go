@@ -29,9 +29,9 @@ func (s *Service) beginTxn(ctx context.Context, write bool) (*txn, error) {
 	return s.db.Read(ctx)
 }
 
-// limits are the limits the standard methods keep to, which are the ones
-// the server advertises.
-var limits = std.Limits{MaxObjectsInGet: MaxObjectsInGet, MaxObjectsInSet: MaxObjectsInSet, MaxQueryLimit: MaxObjectsInGet}
+// Limits are the limits the standard methods keep to.  The server gives
+// the same value to its session, so they are also what it advertises.
+var Limits = jmap.Limits{MaxObjectsInGet: MaxObjectsInGet, MaxObjectsInSet: MaxObjectsInSet, MaxQueryLimit: MaxObjectsInGet}
 
 // The most objects one /get may return, and one /set may change.  A task
 // list is small, but someone's tasks, with the finished ones, need not be.
@@ -60,7 +60,7 @@ func (s *Service) taskListGet(c *jmap.Call, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return std.Get(c, s.beginTxn, limits, std.Getter[*txn]{
+	return std.Get(c, s.beginTxn, Limits, std.Getter[*txn]{
 		Type: typeTaskList,
 		KnownProperty: func(_ context.Context, name string) bool {
 			return taskListProps[name] || isVendorProp(name)
@@ -106,7 +106,7 @@ func (s *Service) taskListSet(c *jmap.Call, raw json.RawMessage) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return std.Set(c, s.beginTxn, limits, std.Setter[*txn]{
+	return std.Set(c, s.beginTxn, Limits, std.Setter[*txn]{
 		Type: typeTaskList,
 		Create: func(_ context.Context, tx *txn, raw json.RawMessage) (string, map[string]any, error) {
 			props, err := jmap.DecodeObject(raw)
@@ -177,7 +177,7 @@ func (s *Service) taskGet(c *jmap.Call, raw json.RawMessage) (any, error) {
 			}
 		}
 	}
-	return std.Get(c, s.beginTxn, limits, std.Getter[*txn]{
+	return std.Get(c, s.beginTxn, Limits, std.Getter[*txn]{
 		Type: typeTask,
 		Count: func(_ context.Context, tx *txn) (int, error) {
 			var n int
@@ -233,7 +233,7 @@ func (s *Service) taskSet(c *jmap.Call, raw json.RawMessage) (any, error) {
 	createdTasks := map[string]*task{} // by id
 	previous := map[string]*task{}     // by id
 
-	return std.Set(c, s.beginTxn, limits, std.Setter[*txn]{
+	return std.Set(c, s.beginTxn, Limits, std.Setter[*txn]{
 		Type: typeTask,
 		Create: func(_ context.Context, tx *txn, raw json.RawMessage) (string, map[string]any, error) {
 			props, err := jmap.DecodeObject(raw)
@@ -368,7 +368,7 @@ func (s *Service) taskQuery(c *jmap.Call, raw json.RawMessage) (any, error) {
 		return nil, sortErr
 	}
 
-	return std.Query(c, s.beginTxn, limits, std.Querier[*txn]{
+	return std.Query(c, s.beginTxn, Limits, std.Querier[*txn]{
 		Type: typeTask,
 		All: func(_ context.Context, tx *txn, _ *std.QueryRequest) ([]string, error) {
 			match, filterErr := compileFilter(c, tx, filter, loc)
