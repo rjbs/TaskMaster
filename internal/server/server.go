@@ -24,6 +24,10 @@ type Config struct {
 	// object.  Otherwise they are derived from each request.
 	BaseURL string
 
+	// HostNames are names the server is known by, besides the one in
+	// BaseURL.  More can be given later, to the Guard.
+	HostNames []string
+
 	Directory *auth.Directory
 	Accounts  *tasks.Registry
 	Processor *jmap.Processor
@@ -35,7 +39,8 @@ type Config struct {
 }
 
 type Server struct {
-	mux *http.ServeMux
+	guard   *httpd.Guard
+	guarded http.Handler
 }
 
 func New(cfg Config) *Server {
@@ -43,7 +48,9 @@ func New(cfg Config) *Server {
 		cfg.Logger = slog.Default()
 	}
 	cfg.Processor.Logger = cfg.Logger
+	guard := httpd.NewGuard(cfg.HostNames...)
 	j := httpd.New(httpd.Config{
+		Guard:     guard,
 		BaseURL:   cfg.BaseURL,
 		Processor: cfg.Processor,
 		Directory: cfg.Directory,
@@ -62,19 +69,27 @@ func New(cfg Config) *Server {
 		Logger:       cfg.Logger,
 	})
 
-	s := &Server{mux: http.NewServeMux()}
-	s.mux.Handle("/", j)
+	mux := http.NewServeMux()
+	mux.Handle("/", j)
 	if cfg.Page != nil {
-		s.mux.Handle("GET /{$}", cfg.Page)
-		s.mux.Handle("GET /index.html", cfg.Page)
+		mux.Handle("GET /{$}", cfg.Page)
+		mux.Handle("GET /index.html", cfg.Page)
 	}
-	return s
+
+	// The page is guarded along with the API, which guards itself: a
+	// page that could be read under another name would be a way in.
+	return &Server{guard: guard, guarded: guard.Handler(mux)}
 }
+
+// Guard is what keeps browsers from being used against the server.  It is
+// here to be told names the server turns out to have, like its tailnet
+// node's.
+func (s *Server) Guard() *httpd.Guard { return s.guard }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if _, ok := auth.UserFrom(r.Context()); !ok {
 		http.Error(w, "authentication required", http.StatusUnauthorized)
 		return
 	}
-	s.mux.ServeHTTP(w, r)
+	s.guarded.ServeHTTP(w, r)
 }

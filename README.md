@@ -60,12 +60,20 @@ method call naming any other account fails with `accountNotFound`.
 |-------------|--------------------|---------------------------------------------------|
 | `listen`    | `127.0.0.1:8080`   | plain HTTP listener; empty disables it            |
 | `baseUrl`   | derived per request| public base URL for the Session object URLs       |
+| `hostNames` | none               | other names clients reach the server by; see below |
 | `timeZone`  | `America/New_York` | server-side fallback zone for tasks with no `timeZone` (see below) |
 | `dataDir`   | the config file dir| where `<account>.sqlite` files live unless an account gives a `path` |
 | `tailscale` | absent             | `{ "hostname": ..., "dir": ..., "https": ... }`; see below |
 | `demoClient`| `true`             | serve the TaskBlaster page at `/` on every listener  |
 
 Relative paths are resolved against the directory holding the config file.
+
+A request addressed to a name the server doesn't know as its own is refused,
+with status 421.  This keeps a web page from reading your tasks through a
+browser on a machine the server trusts, by giving its own name the server's
+address.  The server knows the name in `baseUrl` and its tailnet names; any
+other, such as the name of a proxy in front of it, goes in `hostNames`.
+Requests to an IP address or to `localhost` are never refused for this.
 
 ### Bearer tokens
 
