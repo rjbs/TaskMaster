@@ -5,7 +5,7 @@ go 1.27.3
 require (
 	github.com/google/uuid v1.6.0
 	github.com/rjbs/gizmo v0.1.4
-	tailscale.com v1.104.4
+	github.com/rjbs/gizmo/tailnet v0.1.0
 )
 
 require (
@@ -60,4 +60,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 	modernc.org/sqlite v1.61.0 // indirect
+	tailscale.com v1.104.4 // indirect
 )

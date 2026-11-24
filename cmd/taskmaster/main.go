@@ -20,11 +20,11 @@ import (
 	"github.com/rjbs/gizmo/auth"
 	"github.com/rjbs/gizmo/jmap"
 	"github.com/rjbs/gizmo/push"
+	"github.com/rjbs/gizmo/tailnet"
 
 	"github.com/rjbs/taskmaster/internal/config"
 	"github.com/rjbs/taskmaster/internal/server"
 	"github.com/rjbs/taskmaster/internal/store"
-	"github.com/rjbs/taskmaster/internal/tailnet"
 	"github.com/rjbs/taskmaster/internal/tasks"
 
 	taskblaster "github.com/rjbs/taskmaster/demo-client"
@@ -169,7 +169,7 @@ func run(logger *slog.Logger, configPath string) error {
 	}
 
 	if ts := cfg.Tailscale; ts != nil {
-		node, err := tailnet.Start(ctx, ts.Hostname, ts.Dir, logger)
+		node, err := tailnet.Start(ctx, tailnet.Config{Hostname: ts.Hostname, Dir: ts.Dir, Logger: logger})
 		if err != nil {
 			return fmt.Errorf("joining tailnet: %w", err)
 		}
@@ -178,8 +178,8 @@ func run(logger *slog.Logger, configPath string) error {
 		if err != nil {
 			return fmt.Errorf("tailnet listener: %w", err)
 		}
-		srv.Guard().AllowHost(ts.Hostname, node.DNSName)
-		logger.Info("listening on tailnet", "url", node.URL(*ts.HTTPS))
+		srv.Guard().AllowHost(node.Names()...)
+		logger.Info("listening on tailnet", "url", node.URL(*ts.HTTPS)+"/")
 		serve("tailnet", ln, auth.Bearer(cfg.Directory, reject("tailnet"), auth.Tailscale(cfg.Directory, node.WhoIs, reject("tailnet"), srv)))
 	}
 
