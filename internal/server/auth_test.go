@@ -226,8 +226,8 @@ func TestUnauthenticatedRequestsAreRefused(t *testing.T) {
 	m := newMultiEnv(t, twoUsers, threeAccounts)
 	bare := httptest.NewServer(m.srv)
 	t.Cleanup(bare.Close)
-	if resp, _ := http.Get(bare.URL + "/.well-known/jmap"); resp.StatusCode != 401 {
-		t.Errorf("no user in context: status %d", resp.StatusCode)
+	if got := jmaptest.New(t, bare.URL).Get("/.well-known/jmap"); got.Status != 401 {
+		t.Errorf("no user in context: status %d", got.Status)
 	}
 
 	noLoopback, _ := auth.NewDirectory(
@@ -254,21 +254,18 @@ func TestTailscaleMiddleware(t *testing.T) {
 	reject := func(r *http.Request, why string) { rejected = why }
 	ts := httptest.NewServer(auth.Tailscale(m.dir, whois, reject, m.srv))
 	t.Cleanup(ts.Close)
+	c := jmaptest.New(t, ts.URL)
 
 	check := func(name string, id auth.Identity, err error, wantStatus int, wantUser string) {
 		t.Helper()
 		identities["current"], whoisErr, rejected = id, err, ""
-		resp, gerr := http.Get(ts.URL + "/.well-known/jmap")
-		if gerr != nil {
-			t.Fatal(gerr)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != wantStatus {
-			t.Errorf("%s: status %d, want %d", name, resp.StatusCode, wantStatus)
+		got := c.Get("/.well-known/jmap")
+		if got.Status != wantStatus {
+			t.Errorf("%s: status %d, want %d", name, got.Status, wantStatus)
 		}
 		if wantUser != "" {
 			var sess obj
-			json.NewDecoder(resp.Body).Decode(&sess)
+			json.Unmarshal(got.Body, &sess)
 			if sess["username"] != wantUser {
 				t.Errorf("%s: username %v, want %s", name, sess["username"], wantUser)
 			}
@@ -287,27 +284,21 @@ func TestTailscaleMiddleware(t *testing.T) {
 // success, the user and accounts the Session describes.
 func checkAuthorized(t *testing.T, url, authz string, wantStatus int, wantUser string, wantAccounts []string) {
 	t.Helper()
-	req, _ := http.NewRequest("GET", url+"/.well-known/jmap", nil)
-	if authz != "" {
-		req.Header.Set("Authorization", authz)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != wantStatus {
-		t.Errorf("%q: status %d, want %d", authz, resp.StatusCode, wantStatus)
+	c := jmaptest.New(t, url)
+	c.Authorization = authz
+	got := c.Get("/.well-known/jmap")
+	if got.Status != wantStatus {
+		t.Errorf("%q: status %d, want %d", authz, got.Status, wantStatus)
 		return
 	}
 	if wantStatus != 200 {
-		if resp.StatusCode == 401 && resp.Header.Get("WWW-Authenticate") == "" {
+		if got.Status == 401 && got.Header.Get("WWW-Authenticate") == "" {
 			t.Errorf("%q: 401 without WWW-Authenticate", authz)
 		}
 		return
 	}
 	var sess obj
-	json.NewDecoder(resp.Body).Decode(&sess)
+	json.Unmarshal(got.Body, &sess)
 	if sess["username"] != wantUser {
 		t.Errorf("%q: username %v, want %s", authz, sess["username"], wantUser)
 	}

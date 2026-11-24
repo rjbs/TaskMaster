@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -219,8 +218,8 @@ func TestTaskListSetDefault(t *testing.T) {
 	if created["isDefault"] != true {
 		t.Errorf("created list should report isDefault true: %v", created)
 	}
-	if upd := set.Args["updated"].(obj)[oldDefault]; !reflect.DeepEqual(upd, obj{"isDefault": false}) {
-		t.Errorf("old default should be reported updated: %v", set.Args["updated"])
+	if upd := set.Updated(oldDefault); !reflect.DeepEqual(upd, obj{"isDefault": false}) {
+		t.Errorf("old default should be reported updated with isDefault false: %v", upd)
 	}
 	if e.defaultListID() != created["id"] {
 		t.Error("default did not move")
@@ -589,11 +588,11 @@ func TestTaskQuery(t *testing.T) {
 		"File expenses", "Buy bus tickets", "Early bird", "Water the plants", "Plan offsite", "Someday: learn Go")
 
 	resp := e.call("Task/query", obj{"sort": byDue, "position": 1, "limit": 2, "calculateTotal": true})
-	if resp.Args["total"] != json.Number("6") || resp.Args["position"] != json.Number("1") || len(resp.Strs("ids")) != 2 {
+	if resp.Int("total") != 6 || resp.Int("position") != 1 || len(resp.Strs("ids")) != 2 {
 		t.Errorf("paging: %v", resp)
 	}
 	resp = e.call("Task/query", obj{"sort": byDue, "position": -2})
-	if resp.Args["position"] != json.Number("4") || len(resp.Strs("ids")) != 2 {
+	if resp.Int("position") != 4 || len(resp.Strs("ids")) != 2 {
 		t.Errorf("negative position: %v", resp)
 	}
 
@@ -684,6 +683,9 @@ func TestEventSource(t *testing.T) {
 	stream := e.Listen("types=Task&closeafter=state")
 	if stream.Status != 200 {
 		t.Fatalf("event source: status %d", stream.Status)
+	}
+	if ct := stream.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("content type %q", ct)
 	}
 
 	// Give the subscriber a moment to register before we change anything.
@@ -920,9 +922,9 @@ func TestEventSourceInitialState(t *testing.T) {
 	// A closeafter=state client must not be closed by the opening event;
 	// with pinging on it gets a ping as its first byte instead.
 	ev := e.Listen("types=*&closeafter=state&ping=5").Next()
-	var data obj
-	json.Unmarshal([]byte(ev.Data), &data)
-	if ev.Type != "ping" || data["interval"] != 5.0 {
+	var data struct{ Interval int }
+	ev.Decode(t, &data)
+	if ev.Type != "ping" || data.Interval != 5 {
 		t.Errorf("closeafter=state first event: %s %s", ev.Type, ev.Data)
 	}
 }
@@ -932,16 +934,11 @@ func TestDemoPage(t *testing.T) {
 		t.Helper()
 		e := newEnvWith(t, page)
 		for _, path := range []string{"/", "/index.html"} {
-			resp, err := http.Get(e.BaseURL + path)
-			if err != nil {
-				t.Fatal(err)
+			got := e.Get(path)
+			if got.Status != wantStatus {
+				t.Errorf("%s: GET %s: status %d, want %d", name, path, got.Status, wantStatus)
 			}
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode != wantStatus {
-				t.Errorf("%s: GET %s: status %d, want %d", name, path, resp.StatusCode, wantStatus)
-			}
-			if wantStatus == 200 && !bytes.Contains(body, []byte("TaskBlaster")) {
+			if wantStatus == 200 && !bytes.Contains(got.Body, []byte("TaskBlaster")) {
 				t.Errorf("%s: GET %s: body does not look like the page", name, path)
 			}
 		}
