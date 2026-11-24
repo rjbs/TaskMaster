@@ -14,6 +14,7 @@ import (
 
 	"github.com/rjbs/gizmo/auth"
 	"github.com/rjbs/gizmo/jmap"
+	"github.com/rjbs/gizmo/jmaptest"
 	"github.com/rjbs/gizmo/push"
 	"github.com/rjbs/taskmaster/internal/store"
 	"github.com/rjbs/taskmaster/internal/tasks"
@@ -57,28 +58,14 @@ func newMultiEnv(t *testing.T, users map[string]*auth.User, accounts map[string]
 	return &multiEnv{t: t, dir: dir, srv: srv, broker: broker}
 }
 
-// as serves requests as the given user, standing in for a listener's
-// middleware.
-func (m *multiEnv) as(u *auth.User) *httptest.Server {
+// as is a client making requests as the given user, through a server that
+// stands in for a listener's middleware.
+func (m *multiEnv) as(u *auth.User) *jmaptest.Tester {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m.srv.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), u)))
 	}))
 	m.t.Cleanup(ts.Close)
-	return ts
-}
-
-func getSession(t *testing.T, url string) obj {
-	t.Helper()
-	resp, err := http.Get(url + "/.well-known/jmap")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var sess obj
-	if err := json.NewDecoder(resp.Body).Decode(&sess); err != nil {
-		t.Fatal(err)
-	}
-	return sess
+	return jmaptest.New(m.t, ts.URL, jmap.CoreCapability, tasks.Capability)
 }
 
 func sessionAccounts(sess obj) []string {
@@ -90,10 +77,11 @@ func sessionAccounts(sess obj) []string {
 	return ids
 }
 
-func callAs(t *testing.T, url, method string, args obj) invocation {
+// callAs makes one method call as c's user and returns the one sentence
+// answering it, whether a response or an error.
+func callAs(t *testing.T, c *jmaptest.Tester, method string, args obj) *jmaptest.Sentence {
 	t.Helper()
-	e := &env{t: t, ts: &httptest.Server{URL: url}}
-	return e.request(invocation{Name: method, Args: args, CallID: "c"})[0]
+	return c.Request(jmaptest.Do(method, args)).AssertSentences(1)[0]
 }
 
 var twoUsers = map[string]*auth.User{
@@ -112,7 +100,7 @@ var threeAccounts = map[string]*auth.Account{
 // accounts it lists.
 func checkSession(t *testing.T, m *multiEnv, u *auth.User, username, primary string, accounts []string) {
 	t.Helper()
-	sess := getSession(t, m.as(u).URL)
+	sess := m.as(u).Session()
 	if sess["username"] != username {
 		t.Errorf("%s: username = %v", username, sess["username"])
 	}
@@ -132,11 +120,11 @@ func TestSessionListsOnlyOwnedAccounts(t *testing.T) {
 	checkSession(t, m, m.dir.Users["rjbs"], "rjbs", "rjbs", []string{"rjbs", "work"})
 	checkSession(t, m, m.dir.Users["guest"], "guest", "guest", []string{"guest"})
 
-	rjbs := getSession(t, m.as(m.dir.Users["rjbs"]).URL)
+	rjbs := m.as(m.dir.Users["rjbs"]).Session()
 	if got := rjbs["accounts"].(obj)["work"].(obj)["name"]; got != "Work" {
 		t.Errorf("account name = %v", got)
 	}
-	guest := getSession(t, m.as(m.dir.Users["guest"]).URL)
+	guest := m.as(m.dir.Users["guest"]).Session()
 	if rjbs["state"] == guest["state"] {
 		t.Error("two users with different accounts share a session state")
 	}
@@ -163,49 +151,43 @@ func TestCredentialLimitedToAccount(t *testing.T) {
 	checkSession(t, m, m.dir.TailscaleUser("home@example"), "rjbs", "rjbs", []string{"rjbs", "side"})
 	checkSession(t, m, m.dir.TailscaleUser("work@example"), "rjbs", "", []string{"side", "work"})
 
-	work := m.as(m.dir.TailscaleUser("work@example")).URL
+	work := m.as(m.dir.TailscaleUser("work@example"))
 	for _, acct := range []string{"work", "side"} {
-		if inv := callAs(t, work, "TaskList/get", obj{"accountId": acct}); inv.Name != "TaskList/get" {
-			t.Errorf("limited credential, permitted account %s: %v", acct, inv.Args)
-		}
+		callAs(t, work, "TaskList/get", obj{"accountId": acct}).AssertNamed("TaskList/get")
 	}
-	inv := callAs(t, work, "TaskList/get", obj{"accountId": "rjbs"})
-	if inv.Name != "error" || inv.Args["type"] != jmap.ErrAccountNotFound {
-		t.Errorf("limited credential reached rjbs: %v", inv)
-	}
+	callAs(t, work, "TaskList/get", obj{"accountId": "rjbs"}).AssertError(jmap.ErrAccountNotFound)
 }
 
 func TestMethodsRouteByAccount(t *testing.T) {
 	m := newMultiEnv(t, twoUsers, threeAccounts)
-	rjbs := m.as(m.dir.Users["rjbs"]).URL
-	guest := m.as(m.dir.Users["guest"]).URL
+	rjbs := m.as(m.dir.Users["rjbs"])
+	guest := m.as(m.dir.Users["guest"])
 
-	checkAccess := func(url, account, want string) {
+	checkAccess := func(who string, c *jmaptest.Tester, account, want string) {
 		t.Helper()
-		inv := callAs(t, url, "TaskList/get", obj{"accountId": account, "ids": nil})
-		got := inv.Name
+		s := callAs(t, c, "TaskList/get", obj{"accountId": account, "ids": nil})
+		got := s.Name
 		if got == "error" {
-			got = inv.Args["type"].(string)
+			got = s.Str("type")
 		}
 		if got != want {
-			t.Errorf("%s via %s: got %s, want %s", account, url, got, want)
+			t.Errorf("%s via %s: got %s, want %s", account, who, got, want)
 		}
 	}
-	checkAccess(rjbs, "rjbs", "TaskList/get")
-	checkAccess(rjbs, "work", "TaskList/get")
-	checkAccess(rjbs, "guest", jmap.ErrAccountNotFound)
-	checkAccess(rjbs, "nobody", jmap.ErrAccountNotFound)
-	checkAccess(guest, "guest", "TaskList/get")
-	checkAccess(guest, "rjbs", jmap.ErrAccountNotFound)
+	checkAccess("rjbs", rjbs, "rjbs", "TaskList/get")
+	checkAccess("rjbs", rjbs, "work", "TaskList/get")
+	checkAccess("rjbs", rjbs, "guest", jmap.ErrAccountNotFound)
+	checkAccess("rjbs", rjbs, "nobody", jmap.ErrAccountNotFound)
+	checkAccess("guest", guest, "guest", "TaskList/get")
+	checkAccess("guest", guest, "rjbs", jmap.ErrAccountNotFound)
 
 	// Data written to one account is invisible from another, even for the
 	// same user.
-	inv := callAs(t, rjbs, "TaskList/set", obj{"accountId": "work", "create": obj{"k": obj{"name": "Projects"}}})
-	if inv.Name == "error" {
-		t.Fatalf("create in work: %v", inv.Args)
-	}
+	callAs(t, rjbs, "TaskList/set", obj{"accountId": "work", "create": obj{"k": obj{"name": "Projects"}}}).
+		AsSet().AssertNoErrors()
 	count := func(account string) int {
-		return len(callAs(t, rjbs, "TaskList/get", obj{"accountId": account, "ids": nil}).Args["list"].([]any))
+		return len(callAs(t, rjbs, "TaskList/get", obj{"accountId": account, "ids": nil}).
+			AssertNamed("TaskList/get").Args["list"].([]any))
 	}
 	if n := count("work"); n != 2 {
 		t.Errorf("work has %d lists, want 2", n)
@@ -217,31 +199,24 @@ func TestMethodsRouteByAccount(t *testing.T) {
 
 func TestEventSourceCoversOwnedAccounts(t *testing.T) {
 	m := newMultiEnv(t, twoUsers, threeAccounts)
-	rjbs := m.as(m.dir.Users["rjbs"]).URL
+	rjbs := m.as(m.dir.Users["rjbs"])
 
-	resp, err := http.Get(rjbs + "/jmap/eventsource?types=*&closeafter=no&ping=0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	_, data := readEvent(t, resp.Body)
-	changed := data["changed"].(obj)
+	stream := rjbs.Listen("types=*&closeafter=no&ping=0")
+	changed := stream.NextState()
 	if _, ok := changed["work"]; !ok || len(changed) != 2 {
 		t.Errorf("initial event covers %v, want rjbs and work", changed)
 	}
 
 	callAs(t, rjbs, "TaskList/set", obj{"accountId": "work", "create": obj{"k": obj{"name": "Projects"}}})
-	_, data = readEvent(t, resp.Body)
-	changed = data["changed"].(obj)
+	changed = stream.NextState()
 	if _, ok := changed["work"]; !ok || len(changed) != 1 {
 		t.Errorf("change event covers %v, want only work", changed)
 	}
 
 	// Another user's account changing is none of this stream's business.
-	callAs(t, m.as(m.dir.Users["guest"]).URL, "TaskList/set", obj{"accountId": "guest", "create": obj{"k": obj{"name": "Secret"}}})
+	callAs(t, m.as(m.dir.Users["guest"]), "TaskList/set", obj{"accountId": "guest", "create": obj{"k": obj{"name": "Secret"}}})
 	callAs(t, rjbs, "TaskList/set", obj{"accountId": "rjbs", "create": obj{"k": obj{"name": "Mine"}}})
-	_, data = readEvent(t, resp.Body)
-	changed = data["changed"].(obj)
+	changed = stream.NextState()
 	if _, ok := changed["rjbs"]; !ok || len(changed) != 1 {
 		t.Errorf("after guest and rjbs changes, event covers %v, want only rjbs", changed)
 	}
