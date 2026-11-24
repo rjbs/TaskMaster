@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -935,16 +934,11 @@ func TestDemoPage(t *testing.T) {
 		t.Helper()
 		e := newEnvWith(t, page)
 		for _, path := range []string{"/", "/index.html"} {
-			resp, err := http.Get(e.BaseURL + path)
-			if err != nil {
-				t.Fatal(err)
+			got := e.Get(path)
+			if got.Status != wantStatus {
+				t.Errorf("%s: GET %s: status %d, want %d", name, path, got.Status, wantStatus)
 			}
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode != wantStatus {
-				t.Errorf("%s: GET %s: status %d, want %d", name, path, resp.StatusCode, wantStatus)
-			}
-			if wantStatus == 200 && !bytes.Contains(body, []byte("TaskBlaster")) {
+			if wantStatus == 200 && !bytes.Contains(got.Body, []byte("TaskBlaster")) {
 				t.Errorf("%s: GET %s: body does not look like the page", name, path)
 			}
 		}
