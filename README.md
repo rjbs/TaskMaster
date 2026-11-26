@@ -194,7 +194,7 @@ behind the same authentication as the JMAP endpoints.  Set
   on startup.
 * A destroyed task or list is really deleted.  What is left is a
   tombstone, with its id and nothing else, so that `/changes` can report
-  it.  State strings, modseqs and tombstones are kept by
+  it.  State strings, modseqs, and tombstones are kept by
   [Gizmo](https://github.com/rjbs/gizmo), in tables named `gizmo_` and
   something.  A database from before that kept destroyed tasks and lists
   in place; they are deleted when it is next opened, and every client
