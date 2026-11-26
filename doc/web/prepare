@@ -1,0 +1,24 @@
+#!/usr/bin/env perl
+use v5.36;
+
+# For now, the site is the README.  This copies it in as the home page, with
+# each link to a file in the repository, which a reader of the site could
+# not follow, pointed at that file on GitHub.
+#
+#   doc/web/prepare
+
+use FindBin qw($Bin);
+
+my $REPO = 'https://github.com/rjbs/taskmaster/tree/main';
+
+open my $in,  '<:encoding(UTF-8)', "$Bin/../../README.md"
+  or die "can't read README.md: $!";
+open my $out, '>:encoding(UTF-8)', "$Bin/docs/index.md"
+  or die "can't write doc/web/docs/index.md: $!";
+
+my $text = do { local $/; <$in> };
+
+$text =~ s{\]\((?![a-z][a-z0-9+.-]*:|#|/)([^)\s]+)\)}{]($REPO/$1)}g;
+
+print {$out} $text;
+close $out or die "error writing doc/web/docs/index.md: $!";

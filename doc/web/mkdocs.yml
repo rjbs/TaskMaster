@@ -1,0 +1,57 @@
+site_name: TaskMaster
+site_description: >-
+  TaskMaster is a small JMAP for Task Lists server, backed by SQLite.
+# The 404 page can be served at any depth, so it alone needs the site's path
+# to find its style sheets, and it takes that from here.  Every other page
+# links relatively.  If the site moves, change this, or the 404 page comes
+# out unstyled.
+site_url: https://semiotic.systems/taskmaster/
+use_directory_urls: true
+
+# From here to the nav, this file is the same as those of the Jinx manual
+# (../Jinx/doc/manual), the Go booklet in gizmo, NerfLearning, Juke, and
+# Jiggle, but for the primary color, so that the sites look alike and can
+# still be told apart.  Change them together.
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - content.code.copy
+    - navigation.footer
+    - navigation.top
+    - toc.follow
+
+extra_css:
+  - extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Home: index.md
