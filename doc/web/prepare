@@ -9,7 +9,7 @@ use v5.36;
 
 use FindBin qw($Bin);
 
-my $REPO = 'https://github.com/rjbs/TaskMaster/tree/main';
+my $REPO = 'https://github.com/rjbs/taskmaster/tree/main';
 
 open my $in,  '<:encoding(UTF-8)', "$Bin/../../README.md"
   or die "can't read README.md: $!";

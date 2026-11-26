@@ -5,7 +5,7 @@ site_description: >-
 # to find its style sheets, and it takes that from here.  Every other page
 # links relatively.  If the site moves, change this, or the 404 page comes
 # out unstyled.
-site_url: https://semiotic.systems/TaskMaster/
+site_url: https://semiotic.systems/taskmaster/
 use_directory_urls: true
 
 # From here to the nav, this file is the same as those of the Jinx manual
