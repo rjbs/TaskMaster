@@ -6,3 +6,6 @@
 /taskmaster-linux
 /doc/web/site/
 /doc/web/docs/index.md
+
+# Copied in from imprint by its build-site
+/doc/web/docs/imprint.css
